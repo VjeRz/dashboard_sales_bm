@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import base64
 import os
+from github import Github, GithubException
 
 # ------------------------------
 # PAGE CONFIG
@@ -12,8 +14,6 @@ st.set_page_config(page_title="Sales Dashboard - Manado", layout="wide")
 # ------------------------------
 # LOGIN (with roles)
 # ------------------------------
-# Define users: username -> (password, role, company)
-# Role options: IT, Manager, Supervisor, Agency Manager, Agency Team Leader
 users = {
     "it_admin":    {"password": "itpass",   "role": "IT",                "company": None},
     "manager":     {"password": "admin123", "role": "Manager",           "company": None},
@@ -44,46 +44,98 @@ def check_login():
         return False
     return True
 
-# ------------------------------
-# DATA LOADING FROM PERSISTENT FILE
-# ------------------------------
-DATA_PATH = "data/orders.xlsx"
-
-def ensure_data_dir():
-    if not os.path.exists("data"):
-        os.makedirs("data")
-
-def save_uploaded_file(uploaded_file):
-    ensure_data_dir()
-    with open(DATA_PATH, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    # Also save a timestamp file
-    with open("data/last_update.txt", "w") as f:
-        f.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-def get_last_update():
-    try:
-        with open("data/last_update.txt", "r") as f:
-            return f.read().strip()
-    except:
-        return "Never"
-
+# ------------------------------------------------------------
+# DATA LOADING FROM PRIVATE GITHUB REPO (for all users)
+# ------------------------------------------------------------
 @st.cache_data
-def load_orders_from_file():
+def load_orders_from_github():
+    """Download the Excel file from the private GitHub repo."""
     try:
-        df = pd.read_excel(DATA_PATH, sheet_name="Sheet1")
+        g = Github(st.secrets["GITHUB_TOKEN"])
+        repo = g.get_repo(st.secrets["DATA_REPO"])
+        contents = repo.get_contents(st.secrets["DATA_FILE_PATH"])
+        
+        # Decode base64 content
+        file_content = base64.b64decode(contents.content)
+        
+        # Save to a temporary file (because pd.read_excel needs a file path)
+        temp_file = "temp_orders.xlsx"
+        with open(temp_file, "wb") as f:
+            f.write(file_content)
+        
+        df = pd.read_excel(temp_file, sheet_name="Sheet1")
+        os.remove(temp_file)  # clean up
+        
+        # Convert date columns
         date_cols = ["io_ts", "re_ts", "ps_ts", "provi_ts", "fallout_ts", "completed_ts"]
         for col in date_cols:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         return df
+    except GithubException as e:
+        if e.status == 404:
+            st.warning("No data file found in the repository. Please ask IT to upload the file.")
+        else:
+            st.error(f"GitHub error: {e}")
+        return None
     except Exception as e:
         st.error(f"Failed to load data: {e}")
         return None
 
-# ------------------------------
-# ROLE FILTERS
-# ------------------------------
+# ------------------------------------------------------------
+# UPLOAD TO GITHUB (for IT role only)
+# ------------------------------------------------------------
+def upload_to_github(uploaded_file):
+    """Upload (or overwrite) the Excel file in the private GitHub repo."""
+    try:
+        g = Github(st.secrets["GITHUB_TOKEN"])
+        repo = g.get_repo(st.secrets["DATA_REPO"])
+        file_bytes = uploaded_file.getvalue()
+        
+        # Try to get the existing file (to get its SHA for update)
+        try:
+            contents = repo.get_contents(st.secrets["DATA_FILE_PATH"])
+            repo.update_file(
+                contents.path,
+                "Update data file from Streamlit dashboard",
+                file_bytes,
+                contents.sha
+            )
+            st.success("✅ Data file updated successfully on GitHub!")
+        except GithubException as e:
+            if e.status == 404:
+                # File doesn't exist – create it
+                repo.create_file(
+                    st.secrets["DATA_FILE_PATH"],
+                    "Create data file from Streamlit dashboard",
+                    file_bytes
+                )
+                st.success("✅ Data file created successfully on GitHub!")
+            else:
+                raise e
+    except Exception as e:
+        st.error(f"Upload failed: {e}")
+
+# ------------------------------------------------------------
+# GET LAST UPDATE TIME FROM GITHUB
+# ------------------------------------------------------------
+def get_last_update_time():
+    try:
+        g = Github(st.secrets["GITHUB_TOKEN"])
+        repo = g.get_repo(st.secrets["DATA_REPO"])
+        # Get the last commit that affected the data file
+        commits = repo.get_commits(path=st.secrets["DATA_FILE_PATH"])
+        if commits.totalCount > 0:
+            last_commit = commits[0]
+            return last_commit.commit.author.date.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            return "Unknown"
+    except:
+        return "Unknown"
+
+# ------------------------------------------------------------
+# ROLE FILTER
+# ------------------------------------------------------------
 def apply_role_filters(df):
     role = st.session_state.role
     company = st.session_state.company
@@ -102,41 +154,44 @@ if not check_login():
 with st.sidebar:
     st.title("📋 MENU")
     
+    # Logout button (always visible)
+    if st.button("🚪 Logout", use_container_width=True):
+        for key in ["logged_in", "username", "role", "company"]:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+    
+    st.markdown("---")
+    
     # File uploader – only for IT role
     if st.session_state.role == "IT":
         st.subheader("📂 Data Management")
         uploaded_file = st.file_uploader("Upload Excel file (shared for all users)", type=["xlsx", "xls"])
         if uploaded_file is not None:
-            save_uploaded_file(uploaded_file)
-            st.success("Data uploaded and saved! All users will see this data.")
+            upload_to_github(uploaded_file)
             st.rerun()
-        st.caption(f"Current data last updated: {get_last_update()}")
+        st.caption(f"📅 Data last updated: {get_last_update_time()}")
         st.markdown("---")
     
-    # Menu for all users
+    # Navigation menu (all roles)
     menu = st.radio(
         "Go to",
         ["Home", "Branch Performance", "Agency Performance", "Alpro"],
         index=0
     )
 
-# Check if data file exists
-if not os.path.exists(DATA_PATH):
-    if st.session_state.role == "IT":
-        st.warning("No data file found. Please upload an Excel file using the sidebar.")
-    else:
-        st.warning("No data has been uploaded yet. Please ask an IT administrator to upload the data file.")
-    st.stop()
-
-# Load data from persistent file
-orders_raw = load_orders_from_file()
+# ------------------------------
+# LOAD DATA FROM GITHUB
+# ------------------------------
+orders_raw = load_orders_from_github()
 if orders_raw is None:
-    st.error("Failed to load data. Please contact IT.")
     st.stop()
 
 orders = apply_role_filters(orders_raw.copy())
 
-# Date range filter
+# ------------------------------
+# DATE RANGE FILTER
+# ------------------------------
 min_date = orders["io_ts"].min()
 max_date = orders["io_ts"].max()
 if pd.isna(min_date):
@@ -158,11 +213,6 @@ with col_date:
     )
 with col_user:
     st.write(f"👤 **{st.session_state.username}** | Role: {st.session_state.role}")
-    if st.button("🚪 Logout"):
-        for key in ["logged_in", "username", "role", "company"]:
-            if key in st.session_state:
-                del st.session_state[key]
-        st.rerun()
 
 # Apply date filter
 if len(date_range) == 2:
@@ -176,7 +226,7 @@ else:
 st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 
 # ------------------------------
-# HOME PAGE (same as before, slightly cleaned)
+# HOME PAGE
 # ------------------------------
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
@@ -274,7 +324,7 @@ if menu == "Home":
         st.metric("Fallout Rate", f"{fallout_pct:.1f}%")
 
 # ------------------------------
-# OTHER PAGES (placeholders)
+# OTHER PAGES
 # ------------------------------
 elif menu == "Branch Performance":
     st.header("🏢 Branch Performance")

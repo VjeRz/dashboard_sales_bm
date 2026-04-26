@@ -5,9 +5,7 @@ from datetime import datetime
 import base64
 import os
 import traceback
-import csv
 from github import Auth, Github, GithubException
-import json
 
 # ------------------------------
 # PAGE CONFIG
@@ -15,38 +13,7 @@ import json
 st.set_page_config(page_title="Sales Dashboard - Manado", layout="wide")
 
 # ------------------------------
-# INJECT JAVASCRIPT FOR LOCALSTORAGE LOGIN PERSISTENCE
-# ------------------------------
-def inject_localstorage_js():
-    """Adds JavaScript to read/write login state from localStorage."""
-    js_code = """
-    <script>
-    function setLoginState(username, role, company) {
-        localStorage.setItem('sales_dashboard_user', username);
-        localStorage.setItem('sales_dashboard_role', role);
-        if (company) localStorage.setItem('sales_dashboard_company', company);
-        else localStorage.removeItem('sales_dashboard_company');
-    }
-    function getLoginState() {
-        return {
-            username: localStorage.getItem('sales_dashboard_user'),
-            role: localStorage.getItem('sales_dashboard_role'),
-            company: localStorage.getItem('sales_dashboard_company')
-        };
-    }
-    function clearLoginState() {
-        localStorage.removeItem('sales_dashboard_user');
-        localStorage.removeItem('sales_dashboard_role');
-        localStorage.removeItem('sales_dashboard_company');
-    }
-    </script>
-    """
-    st.markdown(js_code, unsafe_allow_html=True)
-
-inject_localstorage_js()
-
-# ------------------------------
-# LOGIN (with localStorage persistence)
+# LOGIN (with query param persistence)
 # ------------------------------
 users = {
     "it_admin":    {"password": "itpass",   "role": "IT",                "company": None},
@@ -58,37 +25,12 @@ users = {
 }
 
 def check_login():
-    # If already logged in via session state, return True
     if "logged_in" in st.session_state and st.session_state.logged_in:
         return True
 
-    # Try to restore from localStorage (via query param hack)
-    # We'll use a hidden component to read localStorage and set session state.
-    # Since Streamlit doesn't directly read JS, we use a text_input with a default value that gets set by JS.
-    # This is a lightweight approach: on page load, we read localStorage and set session state via rerun.
-
-    # We'll create a placeholder that will be filled by JS after page loads.
-    # But simpler: we can redirect to a query param? Let's do a clean approach:
-    # Use st.query_params to pass a token. However, to avoid complexity, I'll implement a direct JS injection that reloads the page with a token.
-    # Actually, the user just wants to stay logged in after refresh. The localStorage method works if we set the session state when the page loads.
-    # We'll add a small JS that sets a hidden input value, then we read it via st.query_params or st.session_state.
-
-    # For simplicity and reliability, I'll use st.query_params to store an encrypted token? Not needed.
-    # Instead, we already have the session state that persists across reruns but not across full page reload? Actually it does.
-    # The issue is likely that Streamlit Cloud resets the entire app on idle. That's a free tier limitation.
-    # To overcome that, we can store the username in a temporary file on GitHub? Overkill.
-
-    # Given time, I'll provide a note that refresh on free tier may reset login, but the localStorage script below will attempt to restore.
-    # I'll implement a simple method: on login, we set a query param with the username. On page load, we check that query param.
-    # That survives page refresh because query params are in the URL.
-
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
-
-    # Check query params for saved login
-    query_params = st.query_params
-    if not st.session_state.logged_in and "user" in query_params:
-        username = query_params["user"]
+    # Restore from query param
+    if "user" in st.query_params:
+        username = st.query_params["user"]
         if username in users:
             st.session_state.logged_in = True
             st.session_state.username = username
@@ -96,7 +38,7 @@ def check_login():
             st.session_state.company = users[username]["company"]
             return True
 
-    if not st.session_state.logged_in:
+    if not st.session_state.get("logged_in", False):
         st.title("🔐 Login to Sales Dashboard")
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -106,9 +48,7 @@ def check_login():
                 st.session_state.username = username
                 st.session_state.role = users[username]["role"]
                 st.session_state.company = users[username]["company"]
-                # Store username in URL query param to survive refresh
                 st.query_params["user"] = username
-                st.success("Login successful")
                 st.rerun()
             else:
                 st.error("Invalid username or password")
@@ -119,114 +59,41 @@ def logout():
     for key in ["logged_in", "username", "role", "company"]:
         if key in st.session_state:
             del st.session_state[key]
-    # Clear query param
     st.query_params.clear()
     st.rerun()
 
 # ------------------------------------------------------------
-# DATA LOADING WITH DELIMITER DETECTION
+# DATA LOADING FROM GITHUB (Parquet summaries)
 # ------------------------------------------------------------
 @st.cache_data(ttl=60)
-def load_orders_from_github():
+def load_summary_data():
+    """Download the Parquet summary files from GitHub repo."""
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        contents = repo.get_contents("orders.csv")
-        
-        file_content = base64.b64decode(contents.content)
-        file_size = len(file_content)
-        if file_size == 0:
-            st.error("File is empty on GitHub. Please upload a valid CSV.")
-            return None
-        
-        temp_file = "temp_orders.csv"
-        with open(temp_file, "wb") as f:
-            f.write(file_content)
-        
-        # Detect delimiter
-        with open(temp_file, 'r', encoding='utf-8') as f:
-            first_line = f.readline()
-            sniffer = csv.Sniffer()
-            delimiter = sniffer.sniff(first_line).delimiter
-        
-        # Read CSV
-        try:
-            df = pd.read_csv(temp_file, sep=delimiter, dtype=str, engine='c')
-        except Exception:
-            df = pd.read_csv(temp_file, sep=delimiter, dtype=str, engine='python')
-        
-        os.remove(temp_file)
-        
-        if df.empty:
-            st.error("CSV has no rows after parsing.")
-            return None
-        
-        # Convert date columns
-        date_cols = ["io_ts", "re_ts", "ps_ts", "provi_ts", "fallout_ts", "completed_ts"]
-        for col in date_cols:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
-        return df
-    except GithubException as e:
-        if e.status == 404:
-            st.warning("No orders.csv found. Please ask IT to upload the file.")
-        else:
-            st.error(f"GitHub error: {e}")
-        return None
+        summary_files = ["daily.parquet", "fallout.parquet", "status.parquet", "channel.parquet", "top_channels.parquet"]
+        data = {}
+        for fname in summary_files:
+            contents = repo.get_contents(f"summary/{fname}")
+            file_content = base64.b64decode(contents.content)
+            temp_file = f"temp_{fname}"
+            with open(temp_file, "wb") as f:
+                f.write(file_content)
+            df = pd.read_parquet(temp_file)
+            os.remove(temp_file)
+            data[fname.replace(".parquet", "")] = df
+        return data["daily"], data["fallout"], data["status"], data["channel"], data["top_channels"]
     except Exception as e:
-        st.error(f"Failed to load data: {e}")
+        st.error(f"Failed to load summary data: {e}")
         st.code(traceback.format_exc())
-        return None
+        return None, None, None, None, None
 
 # ------------------------------------------------------------
-# UPLOAD TO GITHUB
-# ------------------------------------------------------------
-def upload_to_github(uploaded_file, file_name="orders.csv"):
-    try:
-        file_bytes = uploaded_file.getvalue()
-        if len(file_bytes) == 0:
-            st.error("Cannot upload empty file.")
-            return
-        
-        g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
-        repo = g.get_repo(st.secrets["DATA_REPO"])
-        
-        try:
-            contents = repo.get_contents(file_name)
-            repo.update_file(contents.path, f"Update {file_name}", file_bytes, contents.sha)
-        except GithubException as e:
-            if e.status == 404:
-                repo.create_file(file_name, f"Create {file_name}", file_bytes)
-            else:
-                raise e
-        
-        st.success(f"✅ {file_name} uploaded successfully!")
-    except Exception as e:
-        st.error(f"Upload failed: {e}")
-
-# ------------------------------------------------------------
-# LAST UPDATE TIME
-# ------------------------------------------------------------
-def get_last_update_time():
-    try:
-        g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
-        repo = g.get_repo(st.secrets["DATA_REPO"])
-        commits = repo.get_commits(path="orders.csv")
-        if commits.totalCount > 0:
-            return commits[0].commit.author.date.strftime("%Y-%m-%d %H:%M:%S")
-        return "Unknown"
-    except:
-        return "Unknown"
-
-# ------------------------------------------------------------
-# ROLE FILTER
+# ROLE FILTER (for agency users, but summaries are already aggregated – we may not need)
 # ------------------------------------------------------------
 def apply_role_filters(df):
-    role = st.session_state.role
-    company = st.session_state.company
-    if role in ["Agency Manager", "Agency Team Leader"] and company is not None:
-        if "sf_company_name" in df.columns:
-            df = df[df["sf_company_name"] == company]
+    # For summaries, no row-level filtering needed because raw data is not loaded.
+    # Agency users will only see their own data when we build per-agency pages later.
     return df
 
 # ------------------------------
@@ -243,37 +110,25 @@ with st.sidebar:
     st.markdown("---")
     if st.session_state.role == "IT":
         st.subheader("📂 Data Management")
-        uploaded_file = st.file_uploader("Upload Orders CSV file", type=["csv"])
-        if uploaded_file is not None:
-            upload_to_github(uploaded_file, "orders.csv")
-            st.cache_data.clear()
-            st.rerun()
-        st.caption(f"📅 Last updated: {get_last_update_time()}")
-        st.markdown("---")
+        st.info("Data is pre‑aggregated. To update, run aggregation script locally and upload new Parquet files to GitHub.")
     menu = st.radio(
         "Go to",
         ["Home", "Branch Performance", "Agency Performance", "Alpro", "Collection"],
         index=0
     )
 
-# Load data
-orders_raw = load_orders_from_github()
-if orders_raw is None:
+# Load summary data
+daily, fallout, status, channel, top = load_summary_data()
+if daily is None:
     st.stop()
 
-orders = apply_role_filters(orders_raw.copy())
-
-# Date range filter
-min_date = orders["io_ts"].min()
-max_date = orders["io_ts"].max()
-if pd.isna(min_date):
-    st.error("No valid io_ts dates found in data")
-    st.stop()
-
+# Filter by date range (the dashboard still allows date range selection)
+# The daily table has a 'date' column (datetime)
+min_date = daily["date"].min()
+max_date = daily["date"].max()
 default_start = min_date.date()
 default_end = max_date.date()
 
-# Top bar
 st.markdown("## 🏠 SALES DASHBOARD – BRANCH MANADO")
 col_date, col_user = st.columns([3,1])
 with col_date:
@@ -287,24 +142,24 @@ with col_user:
     st.write(f"👤 **{st.session_state.username}** | Role: {st.session_state.role}")
 
 if len(date_range) == 2:
-    start_date, end_date = date_range
-    mask = (orders["io_ts"] >= pd.to_datetime(start_date)) & (orders["io_ts"] <= pd.to_datetime(end_date))
-    filtered = orders[mask].copy()
+    start, end = date_range
+    filtered_daily = daily[(daily["date"] >= pd.to_datetime(start)) & (daily["date"] <= pd.to_datetime(end))]
 else:
-    filtered = orders.copy()
-    start_date, end_date = default_start, default_end
+    filtered_daily = daily.copy()
+    start, end = default_start, default_end
 
-st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
+st.sidebar.markdown(f"**Data period:** {start} to {end}")
 
 # ------------------------------
-# HOME PAGE (AOA Summary)
+# HOME PAGE (using pre‑aggregated summaries)
 # ------------------------------
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
 
-    total_orders = len(filtered)
-    complete_orders = filtered["ps_ts"].notna().sum() if "ps_ts" in filtered else 0
-    fallout_orders = filtered["fallout_category"].notna().sum() if "fallout_category" in filtered else 0
+    # Totals from filtered daily data
+    total_orders = filtered_daily["IO"].sum()
+    complete_orders = filtered_daily["Complete"].sum()
+    fallout_orders = filtered_daily["Fallout"].sum()
     complete_pct = (complete_orders / total_orders * 100) if total_orders > 0 else 0
     fallout_pct = (fallout_orders / total_orders * 100) if total_orders > 0 else 0
 
@@ -314,79 +169,61 @@ if menu == "Home":
     with col_b:
         st.metric("✅ COMPLETE", f"{complete_pct:.1f}%", delta=f"{complete_orders} orders")
 
-    # IO/RE/PS trend
+    # IO/RE/PS trend using filtered_daily
     st.subheader("📈 IO / RE / PS TREND")
-    daily = filtered.groupby(filtered["io_ts"].dt.date).agg(
-        IO=("order_id", "count"),
-        RE=("re_ts", lambda x: x.notna().sum()),
-        PS=("ps_ts", lambda x: x.notna().sum())
-    ).reset_index()
-    daily.rename(columns={"io_ts": "Date"}, inplace=True)
-    if not daily.empty:
-        fig_trend = px.line(daily, x="Date", y=["IO", "RE", "PS"],
+    trend = filtered_daily[["date", "IO", "RE", "PS"]].copy()
+    trend.rename(columns={"date": "Date"}, inplace=True)
+    if not trend.empty:
+        fig_trend = px.line(trend, x="Date", y=["IO", "RE", "PS"],
                             title="Daily Orders Progress",
                             labels={"value": "Count", "variable": "Stage"})
         st.plotly_chart(fig_trend, use_container_width=True)
     else:
         st.info("No data in selected date range")
 
-    # Fallout & Status
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.subheader("⚠️ TREND FALLOUT KENDALA")
-        if "fallout_category" in filtered.columns and filtered["fallout_category"].notna().any():
-            fallout_counts = filtered["fallout_category"].value_counts().reset_index()
-            fallout_counts.columns = ["Kendala", "Jumlah"]
-            fig_fallout = px.bar(fallout_counts, x="Kendala", y="Jumlah", color="Kendala",
-                                 title="Fallout by Category")
-            st.plotly_chart(fig_fallout, use_container_width=True)
-        else:
-            st.info("No fallout data in selected period")
+    # Fallout breakdown (uses global fallout summary, not date‑filtered – but you can filter if fallout table has date)
+    # For simplicity, we use the full fallout counts. If you need date filtering, you'd need to store date per fallout.
+    # We'll keep it as whole period for now (since fallout summary doesn't have date).
+    st.subheader("⚠️ TREND FALLOUT KENDALA")
+    if not fallout.empty:
+        fig_fallout = px.bar(fallout, x="category", y="count", color="category",
+                             title="Fallout by Category (full data)")
+        st.plotly_chart(fig_fallout, use_container_width=True)
+    else:
+        st.info("No fallout data")
 
-    with col_right:
-        st.subheader("📊 STATUS ORDER")
-        if "process_state" in filtered.columns:
-            status_counts = filtered["process_state"].value_counts()
-            status_map = {
-                "PROVISION_ISSUED": "Provision Issued",
-                "TECH_ASSIGNED": "Tecn Assigned",
-                "COMPLETED": "Complete"
-            }
-            renamed = {status_map.get(k, k): v for k, v in status_counts.items()}
-            status_df = pd.DataFrame(list(renamed.items()), columns=["Status", "Count"])
-            fig_donut = px.pie(status_df, values="Count", names="Status", hole=0.4,
-                               title="Order Status Distribution")
-            st.plotly_chart(fig_donut, use_container_width=True)
-        else:
-            st.info("No process_state column")
+    # Status order donut
+    st.subheader("📊 STATUS ORDER")
+    if not status.empty:
+        fig_donut = px.pie(status, values="count", names="status", hole=0.4,
+                           title="Order Status Distribution")
+        st.plotly_chart(fig_donut, use_container_width=True)
+    else:
+        st.info("No status data")
 
-    # Channel breakdown
+    # Channel breakdown (Sales Force vs Other)
     st.subheader("📢 Order Input by Channel")
-    filtered["source_type"] = filtered["sf_name"].apply(lambda x: "Sales Force" if pd.notna(x) else "Other Channel")
-    channel_counts = filtered["source_type"].value_counts().reset_index()
-    channel_counts.columns = ["Source", "Orders"]
-    fig_channel = px.bar(channel_counts, x="Source", y="Orders", color="Source",
-                         title="Orders by Sales Force vs Other Channels")
-    st.plotly_chart(fig_channel, use_container_width=True)
+    if not channel.empty:
+        fig_channel = px.bar(channel, x="source", y="count", color="source",
+                             title="Orders by Sales Force vs Other Channels")
+        st.plotly_chart(fig_channel, use_container_width=True)
+    else:
+        st.info("No channel data")
 
-    if "channel_name" in filtered.columns:
+    # Top channels
+    if not top.empty:
         st.subheader("📢 Top Order Channels")
-        top_channels = filtered["channel_name"].value_counts().head(5).reset_index()
-        top_channels.columns = ["Channel", "Orders"]
-        fig_top = px.bar(top_channels, x="Channel", y="Orders", color="Channel",
+        fig_top = px.bar(top, x="channel", y="count", color="channel",
                          title="Top 5 Order Channels")
         st.plotly_chart(fig_top, use_container_width=True)
 
-    # Stats
+    # Stats row
     st.subheader("📌 STATS & ORDER")
     avg_completion = 0
-    if "ps_ts" in filtered and "io_ts" in filtered:
-        completion_time = (filtered["ps_ts"] - filtered["io_ts"]).dropna()
-        if len(completion_time) > 0:
-            avg_completion = completion_time.mean().days
+    # We don't have completion time in summary, but you could add it in daily.
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
     with col_s1:
-        st.metric("Avg Completion (days)", f"{avg_completion:.1f}")
+        st.metric("Avg Completion (days)", "Coming soon")
     with col_s2:
         st.metric("Total Orders", total_orders)
     with col_s3:
@@ -399,13 +236,13 @@ if menu == "Home":
 # ------------------------------
 elif menu == "Branch Performance":
     st.header("🏢 Branch Performance")
-    st.info("Detailed branch performance – coming soon. Will use orders, sales_force, alpro, collection, djp, new_lop.")
+    st.info("Detailed branch performance – coming soon.")
 elif menu == "Agency Performance":
     st.header("🤝 Agency Performance")
-    st.info("Detailed agency performance – coming soon. Agency users see only their company data.")
+    st.info("Detailed agency performance – coming soon.")
 elif menu == "Alpro":
     st.header("🔌 Alpro (ODP Production)")
-    st.info("Detailed Alpro page – coming soon. Will use alpro.xlsx.")
+    st.info("Detailed Alpro page – coming soon.")
 elif menu == "Collection":
-    st.header("💰 Collection (C3MR, PRANPC and CT0)")
+    st.header("💰 Collection")
     st.info("Detailed Collection page – coming soon.")

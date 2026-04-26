@@ -46,26 +46,57 @@ def check_login():
     return True
 
 # ------------------------------------------------------------
-# DATA LOADING FROM GITHUB (CSV with dayfirst)
+# DATA LOADING FROM GITHUB (CSV with debug)
 # ------------------------------------------------------------
 @st.cache_data(ttl=60)
 def load_orders_from_github():
-    """Download orders.csv from private GitHub repo and parse Indonesian dates."""
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
         contents = repo.get_contents("orders.csv")
         
         file_content = base64.b64decode(contents.content)
+        file_size = len(file_content)
+        st.info(f"📥 Downloaded orders.csv, size: {file_size} bytes")
+        
+        if file_size == 0:
+            st.error("File is empty on GitHub. Please upload a valid CSV.")
+            return None
+        
         temp_file = "temp_orders.csv"
         with open(temp_file, "wb") as f:
             f.write(file_content)
         
-        # Read all columns as string first to avoid automatic date conversion
-        df = pd.read_csv(temp_file, dtype=str)
+        # Try different encodings and engines
+        try:
+            df = pd.read_csv(temp_file, dtype=str, encoding='utf-8')
+        except UnicodeDecodeError:
+            try:
+                df = pd.read_csv(temp_file, dtype=str, encoding='latin1')
+            except Exception as e:
+                st.error(f"Encoding error: {e}")
+                # Show first 200 bytes to diagnose
+                st.code("File header (first 200 bytes):\n" + file_content[:200].decode('utf-8', errors='replace'))
+                os.remove(temp_file)
+                return None
+        except pd.errors.EmptyDataError:
+            st.error("CSV has no data (empty).")
+            os.remove(temp_file)
+            return None
+        except Exception as e:
+            st.error(f"CSV read error: {e}")
+            # Try with Python engine and auto delimiter
+            df = pd.read_csv(temp_file, engine='python', sep=None, dtype=str)
+        
         os.remove(temp_file)
         
-        # Convert Indonesian date columns (DD/MM/YYYY HH:MM:SS)
+        if df.empty:
+            st.error("CSV has no rows after parsing.")
+            return None
+        
+        st.success(f"✅ Loaded {len(df)} rows, columns: {list(df.columns)[:10]}...")
+        
+        # Convert Indonesian date columns
         date_cols = ["io_ts", "re_ts", "ps_ts", "provi_ts", "fallout_ts", "completed_ts"]
         for col in date_cols:
             if col in df.columns:
@@ -73,7 +104,7 @@ def load_orders_from_github():
         return df
     except GithubException as e:
         if e.status == 404:
-            st.warning("No orders.csv found. Please ask IT to upload the file.")
+            st.warning("No orders.csv found in repository. Please ask IT to upload the file.")
         else:
             st.error(f"GitHub error: {e}")
         return None
@@ -83,31 +114,33 @@ def load_orders_from_github():
         return None
 
 # ------------------------------------------------------------
-# UPLOAD TO GITHUB (IT role)
+# UPLOAD TO GITHUB (IT role with debug)
 # ------------------------------------------------------------
 def upload_to_github(uploaded_file, file_name="orders.csv"):
     try:
+        file_bytes = uploaded_file.getvalue()
+        file_size = len(file_bytes)
+        st.info(f"📤 Uploading file: {file_name}, size: {file_size} bytes")
+        if file_size == 0:
+            st.error("Cannot upload empty file.")
+            return
+        
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        file_bytes = uploaded_file.getvalue()
         
         try:
             contents = repo.get_contents(file_name)
             repo.update_file(
                 contents.path,
-                f"Update {file_name} from Streamlit dashboard",
+                f"Update {file_name} from dashboard",
                 file_bytes,
                 contents.sha
             )
-            st.success(f"✅ {file_name} updated successfully!")
+            st.success(f"✅ {file_name} updated ({file_size} bytes)")
         except GithubException as e:
             if e.status == 404:
-                repo.create_file(
-                    file_name,
-                    f"Create {file_name} from Streamlit dashboard",
-                    file_bytes
-                )
-                st.success(f"✅ {file_name} created successfully!")
+                repo.create_file(file_name, f"Create {file_name}", file_bytes)
+                st.success(f"✅ {file_name} created ({file_size} bytes)")
             else:
                 raise e
     except Exception as e:
@@ -129,7 +162,7 @@ def get_last_update_time():
         return "Unknown"
 
 # ------------------------------------------------------------
-# ROLE FILTER (agency users only see their company)
+# ROLE FILTER
 # ------------------------------------------------------------
 def apply_role_filters(df):
     role = st.session_state.role
@@ -180,7 +213,7 @@ if orders_raw is None:
 
 orders = apply_role_filters(orders_raw.copy())
 
-# Date range filter (using io_ts)
+# Date range filter
 min_date = orders["io_ts"].min()
 max_date = orders["io_ts"].max()
 if pd.isna(min_date):
@@ -316,13 +349,13 @@ if menu == "Home":
 # ------------------------------
 elif menu == "Branch Performance":
     st.header("🏢 Branch Performance")
-    st.info("Detailed branch performance – coming soon. Will use orders, sales_force, alpro, collection, djp, new_lop.")
+    st.info("Detailed branch performance – coming soon.")
 elif menu == "Agency Performance":
     st.header("🤝 Agency Performance")
     st.info("Detailed agency performance – coming soon. Agency users see only their company data.")
 elif menu == "Alpro":
     st.header("🔌 Alpro (ODP Production)")
-    st.info("Detailed Alpro page – coming soon. Will use alpro.xlsx.")
+    st.info("Detailed Alpro page – coming soon.")
 elif menu == "Collection":
     st.header("💰 Collection (C3MR, PRANPC and CT0)")
     st.info("Detailed Collection page – coming soon.")

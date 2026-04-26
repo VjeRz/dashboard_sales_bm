@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime
 import base64
 import os
@@ -10,7 +11,7 @@ from github import Auth, Github, GithubException
 st.set_page_config(page_title="Sales Dashboard - Manado", layout="wide")
 
 # ------------------------------
-# LOGIN (unchanged)
+# LOGIN
 # ------------------------------
 users = {
     "it_admin":    {"password": "itpass",   "role": "IT",                "company": None},
@@ -56,12 +57,20 @@ def logout():
     st.query_params.clear()
     st.rerun()
 
+# ------------------------------------------------------------
+# LOAD ALL PARQUET SUMMARIES FROM GITHUB
+# ------------------------------------------------------------
 @st.cache_data(ttl=60)
 def load_all_summaries():
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        files = ["daily_metrics.parquet", "daily_fallout.parquet", "daily_process.parquet", "daily_subchannel.parquet"]
+        files = [
+            "daily_metrics.parquet",
+            "daily_fallout.parquet",
+            "daily_process.parquet",
+            "daily_subchannel.parquet"
+        ]
         data = {}
         for fname in files:
             contents = repo.get_contents(f"summary/{fname}")
@@ -80,6 +89,9 @@ def load_all_summaries():
         st.code(traceback.format_exc())
         return None, None, None, None
 
+# ------------------------------
+# MAIN APP
+# ------------------------------
 if not check_login():
     st.stop()
 
@@ -97,6 +109,9 @@ daily_metrics, daily_fallout, daily_process, daily_subchannel = load_all_summari
 if daily_metrics is None:
     st.stop()
 
+# ------------------------------
+# DATE RANGE SELECTOR
+# ------------------------------
 min_date = daily_metrics["date"].min()
 max_date = daily_metrics["date"].max()
 default_start = min_date
@@ -115,6 +130,7 @@ if len(date_range) == 2:
 else:
     start_date, end_date = default_start, default_end
 
+# Filter each table by date range
 filtered_metrics = daily_metrics[(daily_metrics["date"] >= start_date) & (daily_metrics["date"] <= end_date)].copy()
 filtered_fallout = daily_fallout[(daily_fallout["date"] >= start_date) & (daily_fallout["date"] <= end_date)].copy()
 filtered_process = daily_process[(daily_process["date"] >= start_date) & (daily_process["date"] <= end_date)].copy()
@@ -122,10 +138,13 @@ filtered_sub = daily_subchannel[(daily_subchannel["date"] >= start_date) & (dail
 
 st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 
+# ------------------------------
+# HOME PAGE
+# ------------------------------
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
 
-    # ----- Process state cards (transparent dark, white text) -----
+    # ----- 1. Process state breakdown as transparent dark cards (white text) -----
     st.subheader("📋 Status Breakdown")
     if not filtered_process.empty:
         process_agg = filtered_process.groupby("process_state")["count"].sum().reset_index()
@@ -134,14 +153,30 @@ if menu == "Home":
         process_agg = process_agg.sort_values("percentage", ascending=False)
 
         icon_map = {
-            "PENDING_CUSTOMER_VERIFICATION": "🕒", "PROVISION_START": "⚙️", "TECH_ASSIGNED": "👨‍🔧",
-            "PENDING_APPOINTMENT_CREATION": "📅", "PENDING_CONTRACT_APPROVAL": "✍️", "PROVISION_ISSUED": "📄",
-            "COMPLETED": "✅", "OSS_TESTING_SERVICE": "🧪", "RE": "🔄", "FALLOUT": "⚠️",
-            "ODP_AVAILABLE": "🔌", "CANCELLED": "❌", "PENDING_PAYMENT_FOLLOWUP": "💳",
-            "PAYMENT_INPROGRESS": "💰", "CANCEL_OSM_COMPLETED": "🚫", "TSEL_ACTIVATION_FALLOUT": "📡",
-            "CANCEL_ORDER_INPROGRESS": "⏹️", "TECH_ARRIVED": "🚐", "CANCELLED_SLA": "⏰",
-            "PENDING_DUNNING_PAYMENT_FOLLOWUP": "📞", "PENDING_PAYMENT": "💵", "TECH_PICKED_UP": "🔧",
-            "TECH_ON_THE_WAY": "🚗", "CONTRACT_APPROVED": "✅"
+            "PENDING_CUSTOMER_VERIFICATION": "🕒",
+            "PROVISION_START": "⚙️",
+            "TECH_ASSIGNED": "👨‍🔧",
+            "PENDING_APPOINTMENT_CREATION": "📅",
+            "PENDING_CONTRACT_APPROVAL": "✍️",
+            "PROVISION_ISSUED": "📄",
+            "COMPLETED": "✅",
+            "OSS_TESTING_SERVICE": "🧪",
+            "RE": "🔄",
+            "FALLOUT": "⚠️",
+            "ODP_AVAILABLE": "🔌",
+            "CANCELLED": "❌",
+            "PENDING_PAYMENT_FOLLOWUP": "💳",
+            "PAYMENT_INPROGRESS": "💰",
+            "CANCEL_OSM_COMPLETED": "🚫",
+            "TSEL_ACTIVATION_FALLOUT": "📡",
+            "CANCEL_ORDER_INPROGRESS": "⏹️",
+            "TECH_ARRIVED": "🚐",
+            "CANCELLED_SLA": "⏰",
+            "PENDING_DUNNING_PAYMENT_FOLLOWUP": "📞",
+            "PENDING_PAYMENT": "💵",
+            "TECH_PICKED_UP": "🔧",
+            "TECH_ON_THE_WAY": "🚗",
+            "CONTRACT_APPROVED": "✅"
         }
 
         num_cols = 4
@@ -156,7 +191,7 @@ if menu == "Home":
                 with cols[idx]:
                     st.markdown(
                         f"""
-                        <div style="text-align: center; padding: 0.75rem; border: 1px solid rgba(255,255,255,0.2); border-radius: 12px; background-color: rgba(0,0,0,0.4); backdrop-filter: blur(2px);">
+                        <div style="text-align: center; padding: 0.75rem; border: 1px solid rgba(255,255,255,0.2); border-radius: 12px; background-color: rgba(0,0,0,0.5); backdrop-filter: blur(2px);">
                             <div style="font-size: 2.8rem; line-height: 1.2;">{icon}</div>
                             <div style="font-weight: 600; margin-top: 0.5rem; font-size: 0.9rem; color: #f0f0f0;">{state.replace('_', ' ').title()}</div>
                             <div style="font-size: 1.2rem; font-weight: bold; margin-top: 0.25rem; color: #ffffff;">{pct}% | {count:,}</div>
@@ -167,68 +202,126 @@ if menu == "Home":
     else:
         st.info("No process state data in selected period.")
 
-    # ----- IO/RE/PS trend -----
+    # ----- 2. IO/RE/PS trend with conversion rates -----
     st.subheader("📈 IO / RE / PS TREND")
     if not filtered_metrics.empty:
+        # Line chart
         trend_data = filtered_metrics.melt(id_vars=["date"], value_vars=["IO", "RE", "PS"],
                                            var_name="Stage", value_name="Count")
         fig_trend = px.line(trend_data, x="date", y="Count", color="Stage",
-                            title="Daily Orders Progress", labels={"date": "Date", "Count": "Number of Orders"},
+                            title="Daily Orders Progress",
+                            labels={"date": "Date", "Count": "Number of Orders"},
                             line_shape="spline", markers=True)
+        # Add text labels (11pt white)
         for stage in ["IO", "RE", "PS"]:
             stage_data = filtered_metrics[["date", stage]]
             for _, row in stage_data.iterrows():
                 fig_trend.add_annotation(x=row["date"], y=row[stage],
-                                         text=str(row[stage]), showarrow=False, font=dict(size=9), yshift=10)
+                                         text=str(row[stage]),
+                                         showarrow=False,
+                                         font=dict(size=11, color="white"),
+                                         yshift=10)
         st.plotly_chart(fig_trend, use_container_width=True)
+
+        # Conversion rate metrics
+        total_io = filtered_metrics["IO"].sum()
+        total_re = filtered_metrics["RE"].sum()
+        total_ps = filtered_metrics["PS"].sum()
+        io_to_re = (total_re / total_io * 100) if total_io > 0 else 0
+        io_to_ps = (total_ps / total_io * 100) if total_io > 0 else 0
+        re_to_ps = (total_ps / total_re * 100) if total_re > 0 else 0
+
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            st.metric("IO → RE", f"{io_to_re:.1f}%")
+        with col_m2:
+            st.metric("IO → PS", f"{io_to_ps:.1f}%")
+        with col_m3:
+            st.metric("RE → PS", f"{re_to_ps:.1f}%")
     else:
         st.info("No data in selected date range")
 
-    # ----- Fallout trend -----
+    # ----- 3. Fallout trend (legend below, text labels, plus percentage breakdown) -----
     st.subheader("⚠️ TREND FALLOUT KENDALA")
     if not filtered_fallout.empty:
+        # Line chart with legend below
         fig_fallout = px.line(filtered_fallout, x="date", y="count", color="fallout_category",
-                              title="Daily Fallout Breakdown", line_shape="spline", markers=True)
+                              title="Daily Fallout Breakdown",
+                              labels={"date": "Date", "count": "Number of Fallouts", "fallout_category": "Kendala"},
+                              line_shape="spline", markers=True)
+        # Move legend below
+        fig_fallout.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
+        # Add text labels (10pt white)
+        for cat in filtered_fallout["fallout_category"].unique():
+            cat_data = filtered_fallout[filtered_fallout["fallout_category"] == cat]
+            for _, row in cat_data.iterrows():
+                if row["count"] > 0:
+                    fig_fallout.add_annotation(x=row["date"], y=row["count"],
+                                               text=str(row["count"]),
+                                               showarrow=False,
+                                               font=dict(size=10, color="white"),
+                                               yshift=8)
         st.plotly_chart(fig_fallout, use_container_width=True)
+
+        # Percentage distribution of fallout categories
+        fallout_pct = filtered_fallout.groupby("fallout_category")["count"].sum().reset_index()
+        total_fallout = fallout_pct["count"].sum()
+        fallout_pct["percentage"] = (fallout_pct["count"] / total_fallout * 100).round(1)
+        fallout_pct = fallout_pct.sort_values("percentage", ascending=False)
+        fig_pct = px.bar(fallout_pct, x="fallout_category", y="percentage",
+                         title="Fallout Category Distribution (%)",
+                         labels={"fallout_category": "Kendala", "percentage": "Percentage (%)"},
+                         text="percentage")
+        fig_pct.update_traces(texttemplate='%{text}%', textposition='outside')
+        st.plotly_chart(fig_pct, use_container_width=True)
     else:
         st.info("No fallout data in selected period")
 
-    # ----- Subchannel donut -----
+    # ----- 4. Subchannel donut chart (Status Order) -----
     st.subheader("📊 STATUS ORDER (by Subchannel)")
     if not filtered_sub.empty:
         sub_agg = filtered_sub.groupby("subchannel")["count"].sum().reset_index()
+        sub_agg["percentage"] = (sub_agg["count"] / sub_agg["count"].sum() * 100).round(1)
         fig_donut = px.pie(sub_agg, values="count", names="subchannel", hole=0.4,
-                           title=f"Order Distribution by Subchannel (Total: {sub_agg['count'].sum():,})")
+                           title=f"Order Distribution by Subchannel (Total: {sub_agg['count'].sum():,})",
+                           labels={"subchannel": "Channel", "count": "Orders"})
         fig_donut.update_traces(textposition='inside', textinfo='percent+label')
         st.plotly_chart(fig_donut, use_container_width=True)
     else:
         st.info("No subchannel data in selected period")
 
-    # ----- Map placeholder -----
+    # ----- 5. Placeholder for interactive map -----
     st.subheader("🗺️ Interactive Map (Coming Soon)")
     st.info("Map will be added once data is ready.")
 
-    # ----- Additional metrics -----
+    # ----- 6. Additional metrics from filtered_metrics -----
     st.subheader("📌 Additional Metrics")
-    cols = st.columns(4)
-    with cols[0]:
-        st.metric("Total IO", f"{filtered_metrics['IO'].sum():,}")
-    with cols[1]:
-        st.metric("Total RE", f"{filtered_metrics['RE'].sum():,}")
-    with cols[2]:
-        st.metric("Total PS (Complete)", f"{filtered_metrics['PS'].sum():,}")
-    with cols[3]:
-        st.metric("Total Fallout", f"{filtered_metrics['Fallout'].sum():,}")
+    total_io = filtered_metrics["IO"].sum()
+    total_re = filtered_metrics["RE"].sum()
+    total_ps = filtered_metrics["PS"].sum()
+    total_fallout = filtered_metrics["Fallout"].sum()
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total IO", f"{total_io:,}")
+    with col2:
+        st.metric("Total RE", f"{total_re:,}")
+    with col3:
+        st.metric("Total PS (Complete)", f"{total_ps:,}")
+    with col4:
+        st.metric("Total Fallout", f"{total_fallout:,}")
 
+# ------------------------------
+# OTHER PAGES (placeholders)
+# ------------------------------
 elif menu == "Branch Performance":
     st.header("🏢 Branch Performance")
-    st.info("Coming soon.")
+    st.info("Detailed branch performance – coming soon.")
 elif menu == "Agency Performance":
     st.header("🤝 Agency Performance")
-    st.info("Coming soon.")
+    st.info("Detailed agency performance – coming soon.")
 elif menu == "Alpro":
     st.header("🔌 Alpro (ODP Production)")
-    st.info("Coming soon.")
+    st.info("Detailed Alpro page – coming soon.")
 elif menu == "Collection":
-    st.header("💰 Collection")
-    st.info("Coming soon.")
+    st.header("💰 Collection (C3MR, PRANPC and CT0)")
+    st.info("Detailed Collection page – coming soon.")

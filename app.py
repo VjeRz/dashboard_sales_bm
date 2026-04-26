@@ -92,18 +92,27 @@ def load_all_data():
         return None, None, None, None, None, None
 
 # ------------------------------------------------------------
-# LOAD INDONESIA JSON FROM GITHUB (UPDATED TO .json)
+# LOAD GEOJSON WITH DEBUGGING
 # ------------------------------------------------------------
 @st.cache_data
 def load_geojson():
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        # Use .json file (not .geojson) – change filename if yours is different
-        contents = repo.get_contents("indonesia.json")
+        # Try root first, then summary
+        try:
+            contents = repo.get_contents("indonesia.json")
+            st.info("✅ Found indonesia.json in root")
+        except:
+            contents = repo.get_contents("summary/indonesia.json")
+            st.info("✅ Found indonesia.json in summary/ folder")
+        
         file_content = base64.b64decode(contents.content)
+        # DEBUG: print first 300 characters
+        st.subheader("Debug: First 300 characters of indonesia.json")
+        st.code(file_content[:300].decode('utf-8', errors='replace'))
+        
         geojson = json.loads(file_content.decode('utf-8'))
-        # Detect property name for province
         props = geojson["features"][0]["properties"]
         if "PROVINSI" in props:
             featureid = "PROVINSI"
@@ -113,9 +122,10 @@ def load_geojson():
             featureid = "name"
         else:
             featureid = list(props.keys())[0]
+        st.success(f"GeoJSON loaded. Using property: {featureid}")
         return geojson, featureid
     except Exception as e:
-        st.warning(f"Indonesia JSON not available: {e}")
+        st.error(f"Indonesia JSON error: {e}")
         return None, None
 
 # ------------------------------

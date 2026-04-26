@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Data files (prevent large data from being committed)
+*.xlsx
+*.csv
+*.xls
+
+# Streamlit secrets (the local version we won't push)
+.streamlit/secrets.toml
+
+# IDE
+.vscode/
+.idea/

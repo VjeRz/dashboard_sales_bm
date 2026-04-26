@@ -1,17 +1,18 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
 import base64
 import os
 import traceback
+import json
+import requests
 from github import Auth, Github, GithubException
 
 st.set_page_config(page_title="Sales Dashboard - Manado", layout="wide")
 
 # ------------------------------
-# LOGIN
+# LOGIN (with query param persistence)
 # ------------------------------
 users = {
     "it_admin":    {"password": "itpass",   "role": "IT",                "company": None},
@@ -58,36 +59,64 @@ def logout():
     st.rerun()
 
 # ------------------------------------------------------------
-# LOAD ALL PARQUET SUMMARIES FROM GITHUB
+# DATA LOADING FROM GITHUB (Parquet summaries)
 # ------------------------------------------------------------
 @st.cache_data(ttl=60)
-def load_all_summaries():
+def load_all_data():
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        files = [
-            "daily_metrics.parquet",
-            "daily_fallout.parquet",
-            "daily_process.parquet",
-            "daily_subchannel.parquet"
-        ]
+        files = {
+            "daily_metrics": "summary/daily_metrics.parquet",
+            "daily_fallout": "summary/daily_fallout.parquet",
+            "daily_process": "summary/daily_process.parquet",
+            "daily_subchannel": "summary/daily_subchannel.parquet",
+            "salesforce_summary": "summary/salesforce_summary.parquet",
+            "odp_summary": "summary/odp_summary.parquet"
+        }
         data = {}
-        for fname in files:
-            contents = repo.get_contents(f"summary/{fname}")
+        for name, path in files.items():
+            contents = repo.get_contents(path)
             file_content = base64.b64decode(contents.content)
-            temp = f"temp_{fname}"
+            temp = f"temp_{name}.parquet"
             with open(temp, "wb") as f:
                 f.write(file_content)
             df = pd.read_parquet(temp)
             os.remove(temp)
             if "date" in df.columns:
                 df["date"] = pd.to_datetime(df["date"]).dt.date
-            data[fname.replace(".parquet", "")] = df
-        return data["daily_metrics"], data["daily_fallout"], data["daily_process"], data["daily_subchannel"]
+            data[name] = df
+        return data["daily_metrics"], data["daily_fallout"], data["daily_process"], data["daily_subchannel"], data["salesforce_summary"], data["odp_summary"]
     except Exception as e:
-        st.error(f"Failed to load summary data: {e}")
+        st.error(f"Failed to load data: {e}")
         st.code(traceback.format_exc())
-        return None, None, None, None
+        return None, None, None, None, None, None
+
+# ------------------------------------------------------------
+# LOAD GEOJSON FOR SULAWESI
+# ------------------------------------------------------------
+@st.cache_data
+def load_geojson():
+    url = "https://raw.githubusercontent.com/superpikar/indonesia-geojson/master/sulawesi.geojson"
+    try:
+        resp = requests.get(url)
+        if resp.status_code == 200:
+            geojson = resp.json()
+            # Determine the property name for province
+            props = geojson["features"][0]["properties"]
+            if "PROVINSI" in props:
+                featureid = "PROVINSI"
+            elif "name" in props:
+                featureid = "name"
+            else:
+                featureid = list(props.keys())[0]
+            return geojson, featureid
+        else:
+            st.warning("GeoJSON not available. Map will be disabled.")
+            return None, None
+    except Exception as e:
+        st.warning(f"GeoJSON load error: {e}")
+        return None, None
 
 # ------------------------------
 # MAIN APP
@@ -102,15 +131,15 @@ with st.sidebar:
     st.markdown("---")
     if st.session_state.role == "IT":
         st.subheader("📂 Data Management")
-        st.info("Data is pre‑aggregated. To update, run aggregation script locally and upload new Parquet files to GitHub.")
+        st.info("Data is pre‑aggregated. To update, run aggregation scripts and upload new Parquet files.")
     menu = st.radio("Go to", ["Home", "Branch Performance", "Agency Performance", "Alpro", "Collection"], index=0)
 
-daily_metrics, daily_fallout, daily_process, daily_subchannel = load_all_summaries()
+daily_metrics, daily_fallout, daily_process, daily_subchannel, sf_summary, odp_summary = load_all_data()
 if daily_metrics is None:
     st.stop()
 
 # ------------------------------
-# DATE RANGE SELECTOR
+# DATE RANGE FILTER (for orders only)
 # ------------------------------
 min_date = daily_metrics["date"].min()
 max_date = daily_metrics["date"].max()
@@ -130,13 +159,12 @@ if len(date_range) == 2:
 else:
     start_date, end_date = default_start, default_end
 
-# Filter each table by date range
 filtered_metrics = daily_metrics[(daily_metrics["date"] >= start_date) & (daily_metrics["date"] <= end_date)].copy()
 filtered_fallout = daily_fallout[(daily_fallout["date"] >= start_date) & (daily_fallout["date"] <= end_date)].copy()
 filtered_process = daily_process[(daily_process["date"] >= start_date) & (daily_process["date"] <= end_date)].copy()
 filtered_sub = daily_subchannel[(daily_subchannel["date"] >= start_date) & (daily_subchannel["date"] <= end_date)].copy()
 
-st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
+st.sidebar.markdown(f"**Orders period:** {start_date} to {end_date}")
 
 # ------------------------------
 # HOME PAGE
@@ -144,7 +172,86 @@ st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
 
-    # ----- 1. Process state breakdown as transparent dark cards (white text) -----
+    # ----- 1. Interactive Map & Regional Cards -----
+    st.subheader("🗺️ Regional Performance (Click on a province)")
+    geojson, featureid = load_geojson()
+    if sf_summary is not None and odp_summary is not None and geojson is not None:
+        # Merge salesforce and odp summaries
+        sf_renamed = sf_summary.rename(columns={"PROVINSI": "province"})
+        odp_renamed = odp_summary.rename(columns={"PROVINSI": "province"})
+        merged = sf_renamed.merge(odp_renamed, on="province", how="outer").fillna(0)
+        # Ensure numeric columns
+        for col in ["Agencies", "CTB", "SalesForce", "Technicians", "STO", "ODP", "Port", "PortGoLive2025", "Occupancy"]:
+            if col in merged.columns:
+                merged[col] = merged[col].astype(float)
+
+        # Create choropleth map
+        fig_map = px.choropleth(merged,
+                                geojson=geojson,
+                                locations="province",
+                                featureidkey=f"properties.{featureid}",
+                                color="Agencies",
+                                color_continuous_scale="Blues",
+                                range_color=(0, merged["Agencies"].max()),
+                                labels={"Agencies": "Number of Agencies"},
+                                hover_name="province",
+                                hover_data=["Agencies", "SalesForce", "Technicians", "STO", "ODP", "Port", "PortGoLive2025", "Occupancy"])
+        fig_map.update_geos(fitbounds="locations", visible=False)
+        fig_map.update_layout(height=500, margin={"r":0, "t":0, "l":0, "b":0})
+
+        # Capture click
+        if "selected_province" not in st.session_state:
+            st.session_state.selected_province = None
+        selected = st.plotly_chart(fig_map, use_container_width=True, key="map", on_select="rerun")
+        if selected and selected.get("selection") and selected["selection"].get("points"):
+            point = selected["selection"]["points"][0]
+            st.session_state.selected_province = point.get("location", None)
+        if st.session_state.selected_province is None and not merged.empty:
+            st.session_state.selected_province = merged.iloc[0]["province"]
+
+        # Get row for selected province
+        if st.session_state.selected_province is not None:
+            row = merged[merged["province"] == st.session_state.selected_province]
+            if not row.empty:
+                row = row.iloc[0]
+            else:
+                row = merged.iloc[0]
+        else:
+            row = merged.iloc[0]
+
+        # Display cards
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🏢 Agencies", f"{int(row['Agencies']):,}")
+        with col2:
+            st.metric("🌐 CTB", f"{int(row['CTB']):,}")
+        with col3:
+            st.metric("👥 SalesForce", f"{int(row['SalesForce']):,}")
+        with col4:
+            st.metric("🔧 Technicians", f"{int(row['Technicians']):,}")
+
+        col5, col6, col7, col8 = st.columns(4)
+        with col5:
+            st.metric("📡 STO", f"{int(row['STO']):,}")
+        with col6:
+            st.metric("🔌 ODP", f"{int(row['ODP']):,}")
+        with col7:
+            st.metric("🌉 Port", f"{int(row['Port']):,}")
+        with col8:
+            st.metric("✅ Port Go Live 2025", f"{int(row['PortGoLive2025']):,}")
+
+        st.metric("🏠 Occupancy", f"{row['Occupancy']:.1f}%")
+        st.caption(f"Showing data for: **{st.session_state.selected_province}**")
+    else:
+        st.warning("Map data incomplete. Please ensure salesforce_summary.parquet and odp_summary.parquet are uploaded and GeoJSON is accessible.")
+        if sf_summary is None:
+            st.info("Salesforce summary missing")
+        if odp_summary is None:
+            st.info("ODP summary missing")
+        if geojson is None:
+            st.info("GeoJSON not loaded")
+
+    # ----- 2. Process state cards (same as before) -----
     st.subheader("📋 Status Breakdown")
     if not filtered_process.empty:
         process_agg = filtered_process.groupby("process_state")["count"].sum().reset_index()
@@ -153,32 +260,15 @@ if menu == "Home":
         process_agg = process_agg.sort_values("percentage", ascending=False)
 
         icon_map = {
-            "PENDING_CUSTOMER_VERIFICATION": "🕒",
-            "PROVISION_START": "⚙️",
-            "TECH_ASSIGNED": "👨‍🔧",
-            "PENDING_APPOINTMENT_CREATION": "📅",
-            "PENDING_CONTRACT_APPROVAL": "✍️",
-            "PROVISION_ISSUED": "📄",
-            "COMPLETED": "✅",
-            "OSS_TESTING_SERVICE": "🧪",
-            "RE": "🔄",
-            "FALLOUT": "⚠️",
-            "ODP_AVAILABLE": "🔌",
-            "CANCELLED": "❌",
-            "PENDING_PAYMENT_FOLLOWUP": "💳",
-            "PAYMENT_INPROGRESS": "💰",
-            "CANCEL_OSM_COMPLETED": "🚫",
-            "TSEL_ACTIVATION_FALLOUT": "📡",
-            "CANCEL_ORDER_INPROGRESS": "⏹️",
-            "TECH_ARRIVED": "🚐",
-            "CANCELLED_SLA": "⏰",
-            "PENDING_DUNNING_PAYMENT_FOLLOWUP": "📞",
-            "PENDING_PAYMENT": "💵",
-            "TECH_PICKED_UP": "🔧",
-            "TECH_ON_THE_WAY": "🚗",
-            "CONTRACT_APPROVED": "✅"
+            "PENDING_CUSTOMER_VERIFICATION": "🕒", "PROVISION_START": "⚙️", "TECH_ASSIGNED": "👨‍🔧",
+            "PENDING_APPOINTMENT_CREATION": "📅", "PENDING_CONTRACT_APPROVAL": "✍️", "PROVISION_ISSUED": "📄",
+            "COMPLETED": "✅", "OSS_TESTING_SERVICE": "🧪", "RE": "🔄", "FALLOUT": "⚠️",
+            "ODP_AVAILABLE": "🔌", "CANCELLED": "❌", "PENDING_PAYMENT_FOLLOWUP": "💳",
+            "PAYMENT_INPROGRESS": "💰", "CANCEL_OSM_COMPLETED": "🚫", "TSEL_ACTIVATION_FALLOUT": "📡",
+            "CANCEL_ORDER_INPROGRESS": "⏹️", "TECH_ARRIVED": "🚐", "CANCELLED_SLA": "⏰",
+            "PENDING_DUNNING_PAYMENT_FOLLOWUP": "📞", "PENDING_PAYMENT": "💵", "TECH_PICKED_UP": "🔧",
+            "TECH_ON_THE_WAY": "🚗", "CONTRACT_APPROVED": "✅"
         }
-
         num_cols = 4
         rows = [process_agg.iloc[i:i+num_cols] for i in range(0, len(process_agg), num_cols)]
         for row in rows:
@@ -202,17 +292,16 @@ if menu == "Home":
     else:
         st.info("No process state data in selected period.")
 
-    # ----- 2. IO/RE/PS trend with conversion rates -----
+    # ----- 3. IO/RE/PS trend with conversion rates -----
     st.subheader("📈 IO / RE / PS TREND")
     if not filtered_metrics.empty:
-        # Line chart
         trend_data = filtered_metrics.melt(id_vars=["date"], value_vars=["IO", "RE", "PS"],
                                            var_name="Stage", value_name="Count")
         fig_trend = px.line(trend_data, x="date", y="Count", color="Stage",
                             title="Daily Orders Progress",
                             labels={"date": "Date", "Count": "Number of Orders"},
                             line_shape="spline", markers=True)
-        # Add text labels (11pt white)
+        # Add text labels (white, 11pt)
         for stage in ["IO", "RE", "PS"]:
             stage_data = filtered_metrics[["date", stage]]
             for _, row in stage_data.iterrows():
@@ -223,14 +312,12 @@ if menu == "Home":
                                          yshift=10)
         st.plotly_chart(fig_trend, use_container_width=True)
 
-        # Conversion rate metrics
         total_io = filtered_metrics["IO"].sum()
         total_re = filtered_metrics["RE"].sum()
         total_ps = filtered_metrics["PS"].sum()
         io_to_re = (total_re / total_io * 100) if total_io > 0 else 0
         io_to_ps = (total_ps / total_io * 100) if total_io > 0 else 0
         re_to_ps = (total_ps / total_re * 100) if total_re > 0 else 0
-
         col_m1, col_m2, col_m3 = st.columns(3)
         with col_m1:
             st.metric("IO → RE", f"{io_to_re:.1f}%")
@@ -241,15 +328,13 @@ if menu == "Home":
     else:
         st.info("No data in selected date range")
 
-    # ----- 3. Fallout trend (legend below, text labels, plus percentage breakdown) -----
+    # ----- 4. Fallout trend (line with legend below, plus percentage bar) -----
     st.subheader("⚠️ TREND FALLOUT KENDALA")
     if not filtered_fallout.empty:
-        # Line chart with legend below
         fig_fallout = px.line(filtered_fallout, x="date", y="count", color="fallout_category",
                               title="Daily Fallout Breakdown",
                               labels={"date": "Date", "count": "Number of Fallouts", "fallout_category": "Kendala"},
                               line_shape="spline", markers=True)
-        # Move legend below
         fig_fallout.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5))
         # Add text labels (10pt white)
         for cat in filtered_fallout["fallout_category"].unique():
@@ -263,7 +348,7 @@ if menu == "Home":
                                                yshift=8)
         st.plotly_chart(fig_fallout, use_container_width=True)
 
-        # Percentage distribution of fallout categories
+        # Percentage distribution
         fallout_pct = filtered_fallout.groupby("fallout_category")["count"].sum().reset_index()
         total_fallout = fallout_pct["count"].sum()
         fallout_pct["percentage"] = (fallout_pct["count"] / total_fallout * 100).round(1)
@@ -277,7 +362,7 @@ if menu == "Home":
     else:
         st.info("No fallout data in selected period")
 
-    # ----- 4. Subchannel donut chart (Status Order) -----
+    # ----- 5. Subchannel donut -----
     st.subheader("📊 STATUS ORDER (by Subchannel)")
     if not filtered_sub.empty:
         sub_agg = filtered_sub.groupby("subchannel")["count"].sum().reset_index()
@@ -290,11 +375,7 @@ if menu == "Home":
     else:
         st.info("No subchannel data in selected period")
 
-    # ----- 5. Placeholder for interactive map -----
-    st.subheader("🗺️ Interactive Map (Coming Soon)")
-    st.info("Map will be added once data is ready.")
-
-    # ----- 6. Additional metrics from filtered_metrics -----
+    # ----- 6. Additional metrics -----
     st.subheader("📌 Additional Metrics")
     total_io = filtered_metrics["IO"].sum()
     total_re = filtered_metrics["RE"].sum()

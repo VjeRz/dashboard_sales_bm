@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import os
 
 # ------------------------------
 # PAGE CONFIG
@@ -9,8 +10,19 @@ from datetime import datetime
 st.set_page_config(page_title="Sales Dashboard - Manado", layout="wide")
 
 # ------------------------------
-# LOGIN (using secrets, with fallback for demo)
+# LOGIN (with roles)
 # ------------------------------
+# Define users: username -> (password, role, company)
+# Role options: IT, Manager, Supervisor, Agency Manager, Agency Team Leader
+users = {
+    "it_admin":    {"password": "itpass",   "role": "IT",                "company": None},
+    "manager":     {"password": "admin123", "role": "Manager",           "company": None},
+    "supervisor":  {"password": "sup456",   "role": "Supervisor",        "company": None},
+    "agency1":     {"password": "agency1",  "role": "Agency Manager",    "company": "KOPEGTEL MANGGATA"},
+    "agency2":     {"password": "agency2",  "role": "Agency Team Leader","company": "CV GLOBAL MANDIRI MOBILINDO"},
+    "johndoe":     {"password": "1234",     "role": "Manager",           "company": None},
+}
+
 def check_login():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
@@ -20,55 +32,57 @@ def check_login():
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         if st.button("Login"):
-            # Try to use secrets if available, otherwise fallback to hardcoded (for local testing)
-            try:
-                if username in st.secrets["passwords"] and password == st.secrets["passwords"][username]:
-                    st.session_state.logged_in = True
-                    st.session_state.username = username
-                    st.session_state.role = st.secrets["users"].get(username, "Viewer")
-                    st.session_state.company = st.secrets["company"].get(username, None)
-                    st.success("Login successful")
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password")
-            except:
-                # Fallback hardcoded (remove after secrets are set)
-                hardcoded = {
-                    "manager":    {"password": "admin123", "role": "Manager", "company": None},
-                    "supervisor": {"password": "sup456",   "role": "Supervisor", "company": None},
-                    "agency1":    {"password": "agency1",  "role": "Agency Manager", "company": "KOPEGTEL MANGGATA"},
-                    "agency2":    {"password": "agency2",  "role": "Agency Team Leader", "company": "CV GLOBAL MANDIRI MOBILINDO"},
-                    "johndoe":    {"password": "1234",     "role": "Manager", "company": None},
-                }
-                if username in hardcoded and password == hardcoded[username]["password"]:
-                    st.session_state.logged_in = True
-                    st.session_state.username = username
-                    st.session_state.role = hardcoded[username]["role"]
-                    st.session_state.company = hardcoded[username]["company"]
-                    st.success("Login successful")
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password")
+            if username in users and users[username]["password"] == password:
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.session_state.role = users[username]["role"]
+                st.session_state.company = users[username]["company"]
+                st.success("Login successful")
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
         return False
     return True
 
 # ------------------------------
-# DATA LOADING (no caching because file uploader can't be cached)
+# DATA LOADING FROM PERSISTENT FILE
 # ------------------------------
+DATA_PATH = "data/orders.xlsx"
+
+def ensure_data_dir():
+    if not os.path.exists("data"):
+        os.makedirs("data")
+
+def save_uploaded_file(uploaded_file):
+    ensure_data_dir()
+    with open(DATA_PATH, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    # Also save a timestamp file
+    with open("data/last_update.txt", "w") as f:
+        f.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+def get_last_update():
+    try:
+        with open("data/last_update.txt", "r") as f:
+            return f.read().strip()
+    except:
+        return "Never"
+
 @st.cache_data
-def load_orders(uploaded_file):
-    """Load and process the uploaded Excel file."""
-    if uploaded_file is not None:
-        df = pd.read_excel(uploaded_file, sheet_name="Sheet1")
+def load_orders_from_file():
+    try:
+        df = pd.read_excel(DATA_PATH, sheet_name="Sheet1")
         date_cols = ["io_ts", "re_ts", "ps_ts", "provi_ts", "fallout_ts", "completed_ts"]
         for col in date_cols:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         return df
-    return None
+    except Exception as e:
+        st.error(f"Failed to load data: {e}")
+        return None
 
 # ------------------------------
-# ROLE FILTER
+# ROLE FILTERS
 # ------------------------------
 def apply_role_filters(df):
     role = st.session_state.role
@@ -84,31 +98,45 @@ def apply_role_filters(df):
 if not check_login():
     st.stop()
 
-# Sidebar: file uploader first
+# Sidebar: show different widgets based on role
 with st.sidebar:
     st.title("📋 MENU")
-    uploaded_file = st.file_uploader("📂 Upload your Order Data Excel file", type=["xlsx", "xls"])
-    st.markdown("---")
+    
+    # File uploader – only for IT role
+    if st.session_state.role == "IT":
+        st.subheader("📂 Data Management")
+        uploaded_file = st.file_uploader("Upload Excel file (shared for all users)", type=["xlsx", "xls"])
+        if uploaded_file is not None:
+            save_uploaded_file(uploaded_file)
+            st.success("Data uploaded and saved! All users will see this data.")
+            st.rerun()
+        st.caption(f"Current data last updated: {get_last_update()}")
+        st.markdown("---")
+    
+    # Menu for all users
     menu = st.radio(
         "Go to",
         ["Home", "Branch Performance", "Agency Performance", "Alpro"],
         index=0
     )
 
-# If no file uploaded, show warning and stop
-if uploaded_file is None:
-    st.warning("Please upload your Order Data Excel file using the sidebar to begin.")
+# Check if data file exists
+if not os.path.exists(DATA_PATH):
+    if st.session_state.role == "IT":
+        st.warning("No data file found. Please upload an Excel file using the sidebar.")
+    else:
+        st.warning("No data has been uploaded yet. Please ask an IT administrator to upload the data file.")
     st.stop()
 
-# Load data
-orders_raw = load_orders(uploaded_file)
+# Load data from persistent file
+orders_raw = load_orders_from_file()
 if orders_raw is None:
-    st.error("Failed to load the uploaded file. Please check the format.")
+    st.error("Failed to load data. Please contact IT.")
     st.stop()
 
 orders = apply_role_filters(orders_raw.copy())
 
-# Date range filter (using io_ts)
+# Date range filter
 min_date = orders["io_ts"].min()
 max_date = orders["io_ts"].max()
 if pd.isna(min_date):
@@ -118,7 +146,7 @@ if pd.isna(min_date):
 default_start = min_date.date()
 default_end = max_date.date()
 
-# Top bar with user info and logout
+# Top bar
 st.markdown("## 🏠 SALES DASHBOARD – BRANCH MANADO")
 col_date, col_user = st.columns([3,1])
 with col_date:
@@ -145,11 +173,10 @@ else:
     filtered = orders.copy()
     start_date, end_date = default_start, default_end
 
-# Sidebar caption (move after date selection)
 st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 
 # ------------------------------
-# HOME PAGE
+# HOME PAGE (same as before, slightly cleaned)
 # ------------------------------
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
@@ -193,7 +220,7 @@ if menu == "Home":
                                  title="Fallout by Category")
             st.plotly_chart(fig_fallout, use_container_width=True)
         else:
-            st.info("No fallout data")
+            st.info("No fallout data in selected period")
 
     with col_right:
         st.subheader("📊 STATUS ORDER")

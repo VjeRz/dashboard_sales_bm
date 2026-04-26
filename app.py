@@ -4,7 +4,8 @@ import plotly.express as px
 from datetime import datetime
 import base64
 import os
-from github import Github, GithubException
+import traceback
+from github import Auth, Github, GithubException
 
 # ------------------------------
 # PAGE CONFIG
@@ -45,28 +46,26 @@ def check_login():
     return True
 
 # ------------------------------------------------------------
-# DATA LOADING FROM PRIVATE GITHUB REPO (for all users)
+# DATA LOADING FROM PRIVATE GITHUB REPO
 # ------------------------------------------------------------
-@st.cache_data
+@st.cache_data(ttl=60)   # cache expires after 60 seconds to pick up new uploads
 def load_orders_from_github():
     """Download the Excel file from the private GitHub repo."""
     try:
-        g = Github(st.secrets["GITHUB_TOKEN"])
+        g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
         contents = repo.get_contents(st.secrets["DATA_FILE_PATH"])
         
-        # Decode base64 content
         file_content = base64.b64decode(contents.content)
-        
-        # Save to a temporary file (because pd.read_excel needs a file path)
         temp_file = "temp_orders.xlsx"
         with open(temp_file, "wb") as f:
             f.write(file_content)
         
-        df = pd.read_excel(temp_file, sheet_name="Sheet1")
-        os.remove(temp_file)  # clean up
+        # Read the first sheet (sheet_name=0) – avoids "Sheet1" name mismatch
+        df = pd.read_excel(temp_file, sheet_name=0)
+        os.remove(temp_file)
         
-        # Convert date columns
+        # Convert date columns if they exist
         date_cols = ["io_ts", "re_ts", "ps_ts", "provi_ts", "fallout_ts", "completed_ts"]
         for col in date_cols:
             if col in df.columns:
@@ -80,19 +79,18 @@ def load_orders_from_github():
         return None
     except Exception as e:
         st.error(f"Failed to load data: {e}")
+        st.code(traceback.format_exc())
         return None
 
 # ------------------------------------------------------------
-# UPLOAD TO GITHUB (for IT role only)
+# UPLOAD TO GITHUB (IT role only)
 # ------------------------------------------------------------
 def upload_to_github(uploaded_file):
-    """Upload (or overwrite) the Excel file in the private GitHub repo."""
     try:
-        g = Github(st.secrets["GITHUB_TOKEN"])
+        g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
         file_bytes = uploaded_file.getvalue()
         
-        # Try to get the existing file (to get its SHA for update)
         try:
             contents = repo.get_contents(st.secrets["DATA_FILE_PATH"])
             repo.update_file(
@@ -104,7 +102,6 @@ def upload_to_github(uploaded_file):
             st.success("✅ Data file updated successfully on GitHub!")
         except GithubException as e:
             if e.status == 404:
-                # File doesn't exist – create it
                 repo.create_file(
                     st.secrets["DATA_FILE_PATH"],
                     "Create data file from Streamlit dashboard",
@@ -121,9 +118,8 @@ def upload_to_github(uploaded_file):
 # ------------------------------------------------------------
 def get_last_update_time():
     try:
-        g = Github(st.secrets["GITHUB_TOKEN"])
+        g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        # Get the last commit that affected the data file
         commits = repo.get_commits(path=st.secrets["DATA_FILE_PATH"])
         if commits.totalCount > 0:
             last_commit = commits[0]
@@ -150,11 +146,10 @@ def apply_role_filters(df):
 if not check_login():
     st.stop()
 
-# Sidebar: show different widgets based on role
+# Sidebar
 with st.sidebar:
     st.title("📋 MENU")
     
-    # Logout button (always visible)
     if st.button("🚪 Logout", use_container_width=True):
         for key in ["logged_in", "username", "role", "company"]:
             if key in st.session_state:
@@ -163,35 +158,31 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # File uploader – only for IT role
     if st.session_state.role == "IT":
         st.subheader("📂 Data Management")
         uploaded_file = st.file_uploader("Upload Excel file (shared for all users)", type=["xlsx", "xls"])
         if uploaded_file is not None:
             upload_to_github(uploaded_file)
+            # Clear cache so the new file is loaded immediately
+            st.cache_data.clear()
             st.rerun()
         st.caption(f"📅 Data last updated: {get_last_update_time()}")
         st.markdown("---")
     
-    # Navigation menu (all roles)
     menu = st.radio(
         "Go to",
-        ["Home", "Branch Performance", "Agency Performance", "Alpro"],
+        ["Home", "Branch Performance", "Agency Performance", "Alpro","Collection"],
         index=0
     )
 
-# ------------------------------
-# LOAD DATA FROM GITHUB
-# ------------------------------
+# Load data
 orders_raw = load_orders_from_github()
 if orders_raw is None:
     st.stop()
 
 orders = apply_role_filters(orders_raw.copy())
 
-# ------------------------------
-# DATE RANGE FILTER
-# ------------------------------
+# Date range filter
 min_date = orders["io_ts"].min()
 max_date = orders["io_ts"].max()
 if pd.isna(min_date):
@@ -214,7 +205,6 @@ with col_date:
 with col_user:
     st.write(f"👤 **{st.session_state.username}** | Role: {st.session_state.role}")
 
-# Apply date filter
 if len(date_range) == 2:
     start_date, end_date = date_range
     mask = (orders["io_ts"] >= pd.to_datetime(start_date)) & (orders["io_ts"] <= pd.to_datetime(end_date))
@@ -226,7 +216,7 @@ else:
 st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 
 # ------------------------------
-# HOME PAGE
+# HOME PAGE (identical to before)
 # ------------------------------
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
@@ -333,5 +323,8 @@ elif menu == "Agency Performance":
     st.header("🤝 Agency Performance")
     st.info("Detailed agency performance – coming soon. Agency users see only their company.")
 elif menu == "Alpro":
-    st.header("🔌 Alpro (ODP Production)")
+    st.header("🔌 Alpro (ODP DATA)")
     st.info("Detailed Alpro page – coming soon.")
+elif menu == "Collection":
+    st.header("💰 Collection (C3MR, PRANPC AND CT0)")
+    st.info("Detailed Collection page – coming soon.")

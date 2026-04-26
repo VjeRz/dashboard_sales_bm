@@ -92,26 +92,18 @@ def load_all_data():
         return None, None, None, None, None, None
 
 # ------------------------------------------------------------
-# LOAD GEOJSON WITH DEBUGGING
+# LOAD GEOJSON (indonesia.json) FROM GITHUB
 # ------------------------------------------------------------
 @st.cache_data
 def load_geojson():
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        # Try root first, then summary
         try:
             contents = repo.get_contents("indonesia.json")
-            st.info("✅ Found indonesia.json in root")
         except:
             contents = repo.get_contents("summary/indonesia.json")
-            st.info("✅ Found indonesia.json in summary/ folder")
-        
         file_content = base64.b64decode(contents.content)
-        # DEBUG: print first 300 characters
-        st.subheader("Debug: First 300 characters of indonesia.json")
-        st.code(file_content[:300].decode('utf-8', errors='replace'))
-        
         geojson = json.loads(file_content.decode('utf-8'))
         props = geojson["features"][0]["properties"]
         if "PROVINSI" in props:
@@ -122,10 +114,9 @@ def load_geojson():
             featureid = "name"
         else:
             featureid = list(props.keys())[0]
-        st.success(f"GeoJSON loaded. Using property: {featureid}")
         return geojson, featureid
     except Exception as e:
-        st.error(f"Indonesia JSON error: {e}")
+        st.warning(f"Indonesia JSON not available: {e}")
         return None, None
 
 # ------------------------------
@@ -186,7 +177,6 @@ if menu == "Home":
     st.subheader("🗺️ Regional Performance (Click on a province)")
     geojson, featureid = load_geojson()
     if sf_summary is not None and odp_summary is not None and geojson is not None:
-        # Prepare data
         sf_renamed = sf_summary.rename(columns={"PROVINSI": "province"})
         odp_renamed = odp_summary.rename(columns={"PROVINSI": "province"})
         merged = sf_renamed.merge(odp_renamed, on="province", how="outer").fillna(0)
@@ -194,7 +184,6 @@ if menu == "Home":
             if col in merged.columns:
                 merged[col] = merged[col].astype(float)
 
-        # Create choropleth map (auto-zoom to Sulawesi)
         fig_map = px.choropleth(merged,
                                 geojson=geojson,
                                 locations="province",
@@ -205,7 +194,6 @@ if menu == "Home":
                                 labels={"Agencies": "Number of Agencies"},
                                 hover_name="province",
                                 hover_data=["Agencies", "SalesForce", "Technicians", "STO", "ODP", "Port", "PortGoLive2025", "Occupancy"])
-        # Zoom to Sulawesi
         fig_map.update_geos(fitbounds="locations", visible=False)
         fig_map.update_layout(
             geo=dict(center=dict(lon=122.5, lat=0.8), projection_scale=3.5),
@@ -213,7 +201,6 @@ if menu == "Home":
             height=500
         )
 
-        # Capture click
         if "selected_province" not in st.session_state:
             st.session_state.selected_province = None
         selected = st.plotly_chart(fig_map, use_container_width=True, key="map", on_select="rerun")
@@ -223,7 +210,6 @@ if menu == "Home":
         if st.session_state.selected_province is None and not merged.empty:
             st.session_state.selected_province = merged.iloc[0]["province"]
 
-        # Get row for selected province
         if st.session_state.selected_province is not None:
             row = merged[merged["province"] == st.session_state.selected_province]
             if not row.empty:
@@ -233,7 +219,6 @@ if menu == "Home":
         else:
             row = merged.iloc[0]
 
-        # Display metric cards
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("🏢 Agencies", f"{int(row['Agencies']):,}")

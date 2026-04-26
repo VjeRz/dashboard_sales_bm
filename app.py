@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
 import base64
 import os
@@ -11,7 +10,7 @@ from github import Auth, Github, GithubException
 st.set_page_config(page_title="Sales Dashboard - Manado", layout="wide")
 
 # ------------------------------
-# LOGIN (unchanged, works)
+# LOGIN
 # ------------------------------
 users = {
     "it_admin":    {"password": "itpass",   "role": "IT",                "company": None},
@@ -80,7 +79,6 @@ def load_all_summaries():
                 f.write(file_content)
             df = pd.read_parquet(temp)
             os.remove(temp)
-            # Convert date column to date (from string or timestamp)
             if "date" in df.columns:
                 df["date"] = pd.to_datetime(df["date"]).dt.date
             data[fname.replace(".parquet", "")] = df
@@ -132,17 +130,10 @@ else:
     start_date, end_date = default_start, default_end
 
 # Filter each table by date range
-mask_metrics = (daily_metrics["date"] >= start_date) & (daily_metrics["date"] <= end_date)
-filtered_metrics = daily_metrics[mask_metrics].copy()
-
-mask_fallout = (daily_fallout["date"] >= start_date) & (daily_fallout["date"] <= end_date)
-filtered_fallout = daily_fallout[mask_fallout].copy()
-
-mask_process = (daily_process["date"] >= start_date) & (daily_process["date"] <= end_date)
-filtered_process = daily_process[mask_process].copy()
-
-mask_sub = (daily_subchannel["date"] >= start_date) & (daily_subchannel["date"] <= end_date)
-filtered_sub = daily_subchannel[mask_sub].copy()
+filtered_metrics = daily_metrics[(daily_metrics["date"] >= start_date) & (daily_metrics["date"] <= end_date)].copy()
+filtered_fallout = daily_fallout[(daily_fallout["date"] >= start_date) & (daily_fallout["date"] <= end_date)].copy()
+filtered_process = daily_process[(daily_process["date"] >= start_date) & (daily_process["date"] <= end_date)].copy()
+filtered_sub = daily_subchannel[(daily_subchannel["date"] >= start_date) & (daily_subchannel["date"] <= end_date)].copy()
 
 st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 
@@ -152,16 +143,17 @@ st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
 
-    # ----- 1. Process state breakdown (percentage + icons) -----
+    # ----- 1. Process state breakdown as cards (icon, name, percentage | total) -----
     st.subheader("📋 Status Breakdown")
-    # Aggregate process state counts over the selected date range
-    process_agg = filtered_process.groupby("process_state")["count"].sum().reset_index()
-    total_state_orders = process_agg["count"].sum()
-    if total_state_orders > 0:
+    if not filtered_process.empty:
+        # Aggregate counts per state over the date range
+        process_agg = filtered_process.groupby("process_state")["count"].sum().reset_index()
+        total_state_orders = process_agg["count"].sum()
         process_agg["percentage"] = (process_agg["count"] / total_state_orders * 100).round(1)
         # Sort by percentage descending
         process_agg = process_agg.sort_values("percentage", ascending=False)
-        # Define icons for some common states (you can extend)
+
+        # Define icon mapping (you can extend)
         icon_map = {
             "PENDING_CUSTOMER_VERIFICATION": "🕒",
             "PROVISION_START": "⚙️",
@@ -188,40 +180,48 @@ if menu == "Home":
             "TECH_ON_THE_WAY": "🚗",
             "CONTRACT_APPROVED": "✅"
         }
-        process_agg["State with Icon"] = process_agg["process_state"].apply(
-            lambda x: f"{icon_map.get(x, '📌')} {x}"
-        )
-        # Use a horizontal bar chart for readability
-        fig_state = px.bar(process_agg, y="State with Icon", x="count", 
-                           orientation='h', text="percentage",
-                           title=f"Order Status Distribution (Total: {total_state_orders})",
-                           labels={"count": "Number of Orders", "State with Icon": ""},
-                           color="percentage", color_continuous_scale="Blues")
-        fig_state.update_traces(texttemplate='%{text}%', textposition='outside')
-        fig_state.update_layout(height=800, margin=dict(l=200))
-        st.plotly_chart(fig_state, use_container_width=True)
+
+        # Create a grid of cards (4 columns per row)
+        num_cols = 4
+        rows = [process_agg.iloc[i:i+num_cols] for i in range(0, len(process_agg), num_cols)]
+        for row in rows:
+            cols = st.columns(num_cols, gap="small")
+            for idx, (_, row_data) in enumerate(row.iterrows()):
+                state = row_data["process_state"]
+                count = row_data["count"]
+                pct = row_data["percentage"]
+                icon = icon_map.get(state, "📊")
+                with cols[idx]:
+                    st.markdown(
+                        f"""
+                        <div style="text-align: center; padding: 0.5rem; border: 1px solid #ddd; border-radius: 8px; background-color: #f9f9f9;">
+                            <div style="font-size: 2.5rem;">{icon}</div>
+                            <div style="font-weight: bold; margin-top: 0.25rem;">{state.replace('_', ' ').title()}</div>
+                            <div style="font-size: 1.2rem; font-weight: bold;">{pct}% | {count:,}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
     else:
         st.info("No process state data in selected period.")
 
     # ----- 2. IO/RE/PS trend (smooth line with markers and values) -----
     st.subheader("📈 IO / RE / PS TREND")
     if not filtered_metrics.empty:
-        # Prepare data for plotting
         trend_data = filtered_metrics.melt(id_vars=["date"], value_vars=["IO", "RE", "PS"],
                                            var_name="Stage", value_name="Count")
         fig_trend = px.line(trend_data, x="date", y="Count", color="Stage",
                             title="Daily Orders Progress",
                             labels={"date": "Date", "Count": "Number of Orders"},
-                            line_shape="spline",  # smooth curve
-                            markers=True)        # add markers
+                            line_shape="spline", markers=True)
         # Add text labels at each point
         for stage in ["IO", "RE", "PS"]:
             stage_data = filtered_metrics[["date", stage]]
-            for i, row in stage_data.iterrows():
+            for _, row in stage_data.iterrows():
                 fig_trend.add_annotation(x=row["date"], y=row[stage],
                                          text=str(row[stage]),
                                          showarrow=False,
-                                         font=dict(size=10),
+                                         font=dict(size=9),
                                          yshift=10)
         st.plotly_chart(fig_trend, use_container_width=True)
     else:
@@ -230,7 +230,6 @@ if menu == "Home":
     # ----- 3. Fallout trend (date vs fallout category) -----
     st.subheader("⚠️ TREND FALLOUT KENDALA")
     if not filtered_fallout.empty:
-        # Aggregate fallout categories per day (if multiple rows per day/category? Already grouped)
         fig_fallout = px.line(filtered_fallout, x="date", y="count", color="fallout_category",
                               title="Daily Fallout Breakdown",
                               labels={"date": "Date", "count": "Number of Fallouts", "fallout_category": "Kendala"},
@@ -244,20 +243,19 @@ if menu == "Home":
     if not filtered_sub.empty:
         sub_agg = filtered_sub.groupby("subchannel")["count"].sum().reset_index()
         sub_agg["percentage"] = (sub_agg["count"] / sub_agg["count"].sum() * 100).round(1)
-        # Define order of subchannels if needed
         fig_donut = px.pie(sub_agg, values="count", names="subchannel", hole=0.4,
-                           title=f"Order Distribution by Subchannel (Total: {sub_agg['count'].sum()})",
+                           title=f"Order Distribution by Subchannel (Total: {sub_agg['count'].sum():,})",
                            labels={"subchannel": "Channel", "count": "Orders"})
         fig_donut.update_traces(textposition='inside', textinfo='percent+label')
         st.plotly_chart(fig_donut, use_container_width=True)
     else:
         st.info("No subchannel data in selected period")
 
-    # ----- 5. Placeholder for interactive map (to be added later) -----
+    # ----- 5. Placeholder for interactive map -----
     st.subheader("🗺️ Interactive Map (Coming Soon)")
     st.info("Map will be added once data is ready.")
 
-    # ----- 6. Additional stats (optional, from filtered_metrics) -----
+    # ----- 6. Additional stats from filtered_metrics -----
     st.subheader("📌 Additional Metrics")
     total_io = filtered_metrics["IO"].sum()
     total_re = filtered_metrics["RE"].sum()
@@ -265,13 +263,13 @@ if menu == "Home":
     total_fallout = filtered_metrics["Fallout"].sum()
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Total IO", total_io)
+        st.metric("Total IO", f"{total_io:,}")
     with col2:
-        st.metric("Total RE", total_re)
+        st.metric("Total RE", f"{total_re:,}")
     with col3:
-        st.metric("Total PS (Complete)", total_ps)
+        st.metric("Total PS (Complete)", f"{total_ps:,}")
     with col4:
-        st.metric("Total Fallout", total_fallout)
+        st.metric("Total Fallout", f"{total_fallout:,}")
 
 # ------------------------------
 # OTHER PAGES (placeholders)

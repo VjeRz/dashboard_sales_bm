@@ -46,9 +46,9 @@ def check_login():
     return True
 
 # ------------------------------------------------------------
-# DATA LOADING FROM PRIVATE GITHUB REPO
+# DATA LOADING FROM PRIVATE GITHUB REPO (with openpyxl engine)
 # ------------------------------------------------------------
-@st.cache_data(ttl=60)   # cache expires after 60 seconds to pick up new uploads
+@st.cache_data(ttl=60)
 def load_orders_from_github():
     """Download the Excel file from the private GitHub repo."""
     try:
@@ -61,8 +61,8 @@ def load_orders_from_github():
         with open(temp_file, "wb") as f:
             f.write(file_content)
         
-        # Read the first sheet (sheet_name=0) – avoids "Sheet1" name mismatch
-        df = pd.read_excel(temp_file, sheet_name=0)
+        # Explicitly specify openpyxl engine
+        df = pd.read_excel(temp_file, sheet_name=0, engine='openpyxl')
         os.remove(temp_file)
         
         # Convert date columns if they exist
@@ -85,29 +85,31 @@ def load_orders_from_github():
 # ------------------------------------------------------------
 # UPLOAD TO GITHUB (IT role only)
 # ------------------------------------------------------------
-def upload_to_github(uploaded_file):
+def upload_to_github(uploaded_file, file_name="orders.xlsx"):
+    """Upload (or overwrite) a file in the private GitHub repo."""
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
         file_bytes = uploaded_file.getvalue()
+        file_path = file_name   # defaults to orders.xlsx, but can be extended later
         
         try:
-            contents = repo.get_contents(st.secrets["DATA_FILE_PATH"])
+            contents = repo.get_contents(file_path)
             repo.update_file(
                 contents.path,
-                "Update data file from Streamlit dashboard",
+                f"Update {file_path} from Streamlit dashboard",
                 file_bytes,
                 contents.sha
             )
-            st.success("✅ Data file updated successfully on GitHub!")
+            st.success(f"✅ {file_path} updated successfully on GitHub!")
         except GithubException as e:
             if e.status == 404:
                 repo.create_file(
-                    st.secrets["DATA_FILE_PATH"],
-                    "Create data file from Streamlit dashboard",
+                    file_path,
+                    f"Create {file_path} from Streamlit dashboard",
                     file_bytes
                 )
-                st.success("✅ Data file created successfully on GitHub!")
+                st.success(f"✅ {file_path} created successfully on GitHub!")
             else:
                 raise e
     except Exception as e:
@@ -160,10 +162,10 @@ with st.sidebar:
     
     if st.session_state.role == "IT":
         st.subheader("📂 Data Management")
-        uploaded_file = st.file_uploader("Upload Excel file (shared for all users)", type=["xlsx", "xls"])
+        # Currently only orders.xlsx is used; later we can add more file uploaders
+        uploaded_file = st.file_uploader("Upload Orders Excel file (shared for all users)", type=["xlsx", "xls"])
         if uploaded_file is not None:
-            upload_to_github(uploaded_file)
-            # Clear cache so the new file is loaded immediately
+            upload_to_github(uploaded_file, "orders.xlsx")
             st.cache_data.clear()
             st.rerun()
         st.caption(f"📅 Data last updated: {get_last_update_time()}")
@@ -171,7 +173,7 @@ with st.sidebar:
     
     menu = st.radio(
         "Go to",
-        ["Home", "Branch Performance", "Agency Performance", "Alpro","Collection"],
+        ["Home", "Branch Performance", "Agency Performance", "Alpro", "Collection"],
         index=0
     )
 
@@ -216,7 +218,7 @@ else:
 st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 
 # ------------------------------
-# HOME PAGE (identical to before)
+# HOME PAGE (AOA summary)
 # ------------------------------
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
@@ -314,17 +316,17 @@ if menu == "Home":
         st.metric("Fallout Rate", f"{fallout_pct:.1f}%")
 
 # ------------------------------
-# OTHER PAGES
+# OTHER PAGES (placeholders)
 # ------------------------------
 elif menu == "Branch Performance":
     st.header("🏢 Branch Performance")
-    st.info("Detailed branch performance – coming soon.")
+    st.info("Detailed branch performance – coming soon. Will use orders, sales_force, alpro, collection, djp, new_lop.")
 elif menu == "Agency Performance":
     st.header("🤝 Agency Performance")
-    st.info("Detailed agency performance – coming soon. Agency users see only their company.")
+    st.info("Detailed agency performance – coming soon. Agency users see only their company data.")
 elif menu == "Alpro":
-    st.header("🔌 Alpro (ODP DATA)")
-    st.info("Detailed Alpro page – coming soon.")
+    st.header("🔌 Alpro (ODP Production)")
+    st.info("Detailed Alpro page – coming soon. Will use alpro.xlsx.")
 elif menu == "Collection":
-    st.header("💰 Collection (C3MR, PRANPC AND CT0)")
+    st.header("💰 Collection (C3MR, PRANPC and CT0)")
     st.info("Detailed Collection page – coming soon.")

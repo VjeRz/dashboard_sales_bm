@@ -46,34 +46,34 @@ def check_login():
     return True
 
 # ------------------------------------------------------------
-# DATA LOADING FROM PRIVATE GITHUB REPO (with openpyxl engine)
+# DATA LOADING FROM GITHUB (CSV with dayfirst)
 # ------------------------------------------------------------
 @st.cache_data(ttl=60)
 def load_orders_from_github():
-    """Download the Excel file from the private GitHub repo."""
+    """Download orders.csv from private GitHub repo and parse Indonesian dates."""
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        contents = repo.get_contents(st.secrets["DATA_FILE_PATH"])
+        contents = repo.get_contents("orders.csv")
         
         file_content = base64.b64decode(contents.content)
-        temp_file = "temp_orders.xlsx"
+        temp_file = "temp_orders.csv"
         with open(temp_file, "wb") as f:
             f.write(file_content)
         
-        # Explicitly specify openpyxl engine
-        df = pd.read_excel(temp_file, sheet_name=0, engine='openpyxl')
+        # Read all columns as string first to avoid automatic date conversion
+        df = pd.read_csv(temp_file, dtype=str)
         os.remove(temp_file)
         
-        # Convert date columns if they exist
+        # Convert Indonesian date columns (DD/MM/YYYY HH:MM:SS)
         date_cols = ["io_ts", "re_ts", "ps_ts", "provi_ts", "fallout_ts", "completed_ts"]
         for col in date_cols:
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+                df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
         return df
     except GithubException as e:
         if e.status == 404:
-            st.warning("No data file found in the repository. Please ask IT to upload the file.")
+            st.warning("No orders.csv found. Please ask IT to upload the file.")
         else:
             st.error(f"GitHub error: {e}")
         return None
@@ -83,56 +83,53 @@ def load_orders_from_github():
         return None
 
 # ------------------------------------------------------------
-# UPLOAD TO GITHUB (IT role only)
+# UPLOAD TO GITHUB (IT role)
 # ------------------------------------------------------------
-def upload_to_github(uploaded_file, file_name="orders.xlsx"):
-    """Upload (or overwrite) a file in the private GitHub repo."""
+def upload_to_github(uploaded_file, file_name="orders.csv"):
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
         file_bytes = uploaded_file.getvalue()
-        file_path = file_name   # defaults to orders.xlsx, but can be extended later
         
         try:
-            contents = repo.get_contents(file_path)
+            contents = repo.get_contents(file_name)
             repo.update_file(
                 contents.path,
-                f"Update {file_path} from Streamlit dashboard",
+                f"Update {file_name} from Streamlit dashboard",
                 file_bytes,
                 contents.sha
             )
-            st.success(f"✅ {file_path} updated successfully on GitHub!")
+            st.success(f"✅ {file_name} updated successfully!")
         except GithubException as e:
             if e.status == 404:
                 repo.create_file(
-                    file_path,
-                    f"Create {file_path} from Streamlit dashboard",
+                    file_name,
+                    f"Create {file_name} from Streamlit dashboard",
                     file_bytes
                 )
-                st.success(f"✅ {file_path} created successfully on GitHub!")
+                st.success(f"✅ {file_name} created successfully!")
             else:
                 raise e
     except Exception as e:
         st.error(f"Upload failed: {e}")
 
 # ------------------------------------------------------------
-# GET LAST UPDATE TIME FROM GITHUB
+# LAST UPDATE TIME
 # ------------------------------------------------------------
 def get_last_update_time():
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        commits = repo.get_commits(path=st.secrets["DATA_FILE_PATH"])
+        commits = repo.get_commits(path="orders.csv")
         if commits.totalCount > 0:
-            last_commit = commits[0]
-            return last_commit.commit.author.date.strftime("%Y-%m-%d %H:%M:%S")
+            return commits[0].commit.author.date.strftime("%Y-%m-%d %H:%M:%S")
         else:
             return "Unknown"
     except:
         return "Unknown"
 
 # ------------------------------------------------------------
-# ROLE FILTER
+# ROLE FILTER (agency users only see their company)
 # ------------------------------------------------------------
 def apply_role_filters(df):
     role = st.session_state.role
@@ -162,13 +159,12 @@ with st.sidebar:
     
     if st.session_state.role == "IT":
         st.subheader("📂 Data Management")
-        # Currently only orders.xlsx is used; later we can add more file uploaders
-        uploaded_file = st.file_uploader("Upload Orders Excel file (shared for all users)", type=["xlsx", "xls"])
+        uploaded_file = st.file_uploader("Upload Orders CSV file (UTF-8)", type=["csv"])
         if uploaded_file is not None:
-            upload_to_github(uploaded_file, "orders.xlsx")
+            upload_to_github(uploaded_file, "orders.csv")
             st.cache_data.clear()
             st.rerun()
-        st.caption(f"📅 Data last updated: {get_last_update_time()}")
+        st.caption(f"📅 Last updated: {get_last_update_time()}")
         st.markdown("---")
     
     menu = st.radio(
@@ -184,7 +180,7 @@ if orders_raw is None:
 
 orders = apply_role_filters(orders_raw.copy())
 
-# Date range filter
+# Date range filter (using io_ts)
 min_date = orders["io_ts"].min()
 max_date = orders["io_ts"].max()
 if pd.isna(min_date):
@@ -218,7 +214,7 @@ else:
 st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 
 # ------------------------------
-# HOME PAGE (AOA summary)
+# HOME PAGE (AOA Summary)
 # ------------------------------
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")

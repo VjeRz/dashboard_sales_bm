@@ -126,8 +126,8 @@ if daily is None:
 # The daily table has a 'date' column (datetime)
 min_date = daily["date"].min()
 max_date = daily["date"].max()
-default_start = min_date.date()
-default_end = max_date.date()
+default_start = min_date
+default_end = max_date
 
 st.markdown("## 🏠 SALES DASHBOARD – BRANCH MANADO")
 col_date, col_user = st.columns([3,1])

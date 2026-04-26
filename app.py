@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime
 import base64
 import os
@@ -10,7 +11,7 @@ from github import Auth, Github, GithubException
 st.set_page_config(page_title="Sales Dashboard - Manado", layout="wide")
 
 # ------------------------------
-# LOGIN
+# LOGIN (unchanged, works)
 # ------------------------------
 users = {
     "it_admin":    {"password": "itpass",   "role": "IT",                "company": None},
@@ -57,14 +58,19 @@ def logout():
     st.rerun()
 
 # ------------------------------------------------------------
-# LOAD PARQUET SUMMARIES FROM GITHUB
+# LOAD ALL PARQUET SUMMARIES FROM GITHUB
 # ------------------------------------------------------------
 @st.cache_data(ttl=60)
-def load_summary_data():
+def load_all_summaries():
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        files = ["daily.parquet", "fallout.parquet", "status.parquet", "channel.parquet", "top_channels.parquet"]
+        files = [
+            "daily_metrics.parquet",
+            "daily_fallout.parquet",
+            "daily_process.parquet",
+            "daily_subchannel.parquet"
+        ]
         data = {}
         for fname in files:
             contents = repo.get_contents(f"summary/{fname}")
@@ -74,12 +80,15 @@ def load_summary_data():
                 f.write(file_content)
             df = pd.read_parquet(temp)
             os.remove(temp)
+            # Convert date column to date (from string or timestamp)
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"]).dt.date
             data[fname.replace(".parquet", "")] = df
-        return data["daily"], data["fallout"], data["status"], data["channel"], data["top_channels"]
+        return data["daily_metrics"], data["daily_fallout"], data["daily_process"], data["daily_subchannel"]
     except Exception as e:
         st.error(f"Failed to load summary data: {e}")
         st.code(traceback.format_exc())
-        return None, None, None, None, None
+        return None, None, None, None
 
 # ------------------------------
 # MAIN APP
@@ -97,15 +106,15 @@ with st.sidebar:
         st.info("Data is pre‑aggregated. To update, run aggregation script locally and upload new Parquet files to GitHub.")
     menu = st.radio("Go to", ["Home", "Branch Performance", "Agency Performance", "Alpro", "Collection"], index=0)
 
-daily, fallout, status, channel, top = load_summary_data()
-if daily is None:
+daily_metrics, daily_fallout, daily_process, daily_subchannel = load_all_summaries()
+if daily_metrics is None:
     st.stop()
 
 # ------------------------------
-# DATE RANGE (using direct date objects)
+# DATE RANGE SELECTOR
 # ------------------------------
-min_date = daily["date"].min()
-max_date = daily["date"].max()
+min_date = daily_metrics["date"].min()
+max_date = daily_metrics["date"].max()
 default_start = min_date
 default_end = max_date
 
@@ -118,13 +127,24 @@ with col_user:
     st.write(f"👤 **{st.session_state.username}** | Role: {st.session_state.role}")
 
 if len(date_range) == 2:
-    start, end = date_range
-    filtered_daily = daily[(daily["date"] >= start) & (daily["date"] <= end)]
+    start_date, end_date = date_range
 else:
-    filtered_daily = daily.copy()
-    start, end = default_start, default_end
+    start_date, end_date = default_start, default_end
 
-st.sidebar.markdown(f"**Data period:** {start} to {end}")
+# Filter each table by date range
+mask_metrics = (daily_metrics["date"] >= start_date) & (daily_metrics["date"] <= end_date)
+filtered_metrics = daily_metrics[mask_metrics].copy()
+
+mask_fallout = (daily_fallout["date"] >= start_date) & (daily_fallout["date"] <= end_date)
+filtered_fallout = daily_fallout[mask_fallout].copy()
+
+mask_process = (daily_process["date"] >= start_date) & (daily_process["date"] <= end_date)
+filtered_process = daily_process[mask_process].copy()
+
+mask_sub = (daily_subchannel["date"] >= start_date) & (daily_subchannel["date"] <= end_date)
+filtered_sub = daily_subchannel[mask_sub].copy()
+
+st.sidebar.markdown(f"**Data period:** {start_date} to {end_date}")
 
 # ------------------------------
 # HOME PAGE
@@ -132,76 +152,126 @@ st.sidebar.markdown(f"**Data period:** {start} to {end}")
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
 
-    total_orders = filtered_daily["IO"].sum()
-    complete_orders = filtered_daily["Complete"].sum()
-    fallout_orders = filtered_daily["Fallout"].sum()
-    complete_pct = (complete_orders / total_orders * 100) if total_orders > 0 else 0
-    fallout_pct = (fallout_orders / total_orders * 100) if total_orders > 0 else 0
+    # ----- 1. Process state breakdown (percentage + icons) -----
+    st.subheader("📋 Status Breakdown")
+    # Aggregate process state counts over the selected date range
+    process_agg = filtered_process.groupby("process_state")["count"].sum().reset_index()
+    total_state_orders = process_agg["count"].sum()
+    if total_state_orders > 0:
+        process_agg["percentage"] = (process_agg["count"] / total_state_orders * 100).round(1)
+        # Sort by percentage descending
+        process_agg = process_agg.sort_values("percentage", ascending=False)
+        # Define icons for some common states (you can extend)
+        icon_map = {
+            "PENDING_CUSTOMER_VERIFICATION": "🕒",
+            "PROVISION_START": "⚙️",
+            "TECH_ASSIGNED": "👨‍🔧",
+            "PENDING_APPOINTMENT_CREATION": "📅",
+            "PENDING_CONTRACT_APPROVAL": "✍️",
+            "PROVISION_ISSUED": "📄",
+            "COMPLETED": "✅",
+            "OSS_TESTING_SERVICE": "🧪",
+            "RE": "🔄",
+            "FALLOUT": "⚠️",
+            "ODP_AVAILABLE": "🔌",
+            "CANCELLED": "❌",
+            "PENDING_PAYMENT_FOLLOWUP": "💳",
+            "PAYMENT_INPROGRESS": "💰",
+            "CANCEL_OSM_COMPLETED": "🚫",
+            "TSEL_ACTIVATION_FALLOUT": "📡",
+            "CANCEL_ORDER_INPROGRESS": "⏹️",
+            "TECH_ARRIVED": "🚐",
+            "CANCELLED_SLA": "⏰",
+            "PENDING_DUNNING_PAYMENT_FOLLOWUP": "📞",
+            "PENDING_PAYMENT": "💵",
+            "TECH_PICKED_UP": "🔧",
+            "TECH_ON_THE_WAY": "🚗",
+            "CONTRACT_APPROVED": "✅"
+        }
+        process_agg["State with Icon"] = process_agg["process_state"].apply(
+            lambda x: f"{icon_map.get(x, '📌')} {x}"
+        )
+        # Use a horizontal bar chart for readability
+        fig_state = px.bar(process_agg, y="State with Icon", x="count", 
+                           orientation='h', text="percentage",
+                           title=f"Order Status Distribution (Total: {total_state_orders})",
+                           labels={"count": "Number of Orders", "State with Icon": ""},
+                           color="percentage", color_continuous_scale="Blues")
+        fig_state.update_traces(texttemplate='%{text}%', textposition='outside')
+        fig_state.update_layout(height=800, margin=dict(l=200))
+        st.plotly_chart(fig_state, use_container_width=True)
+    else:
+        st.info("No process state data in selected period.")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.metric("📉 FALLOUT", f"{fallout_pct:.1f}%", delta=f"{fallout_orders} orders")
-    with col_b:
-        st.metric("✅ COMPLETE", f"{complete_pct:.1f}%", delta=f"{complete_orders} orders")
-
-    # IO/RE/PS trend
+    # ----- 2. IO/RE/PS trend (smooth line with markers and values) -----
     st.subheader("📈 IO / RE / PS TREND")
-    trend = filtered_daily[["date", "IO", "RE", "PS"]].copy()
-    trend.rename(columns={"date": "Date"}, inplace=True)
-    if not trend.empty:
-        fig_trend = px.line(trend, x="Date", y=["IO", "RE", "PS"],
+    if not filtered_metrics.empty:
+        # Prepare data for plotting
+        trend_data = filtered_metrics.melt(id_vars=["date"], value_vars=["IO", "RE", "PS"],
+                                           var_name="Stage", value_name="Count")
+        fig_trend = px.line(trend_data, x="date", y="Count", color="Stage",
                             title="Daily Orders Progress",
-                            labels={"value": "Count", "variable": "Stage"})
+                            labels={"date": "Date", "Count": "Number of Orders"},
+                            line_shape="spline",  # smooth curve
+                            markers=True)        # add markers
+        # Add text labels at each point
+        for stage in ["IO", "RE", "PS"]:
+            stage_data = filtered_metrics[["date", stage]]
+            for i, row in stage_data.iterrows():
+                fig_trend.add_annotation(x=row["date"], y=row[stage],
+                                         text=str(row[stage]),
+                                         showarrow=False,
+                                         font=dict(size=10),
+                                         yshift=10)
         st.plotly_chart(fig_trend, use_container_width=True)
     else:
         st.info("No data in selected date range")
 
-    # Fallout breakdown (global, not date‑filtered – you can enhance later)
+    # ----- 3. Fallout trend (date vs fallout category) -----
     st.subheader("⚠️ TREND FALLOUT KENDALA")
-    if not fallout.empty:
-        fig_fallout = px.bar(fallout, x="category", y="count", color="category",
-                             title="Fallout by Category (full data)")
+    if not filtered_fallout.empty:
+        # Aggregate fallout categories per day (if multiple rows per day/category? Already grouped)
+        fig_fallout = px.line(filtered_fallout, x="date", y="count", color="fallout_category",
+                              title="Daily Fallout Breakdown",
+                              labels={"date": "Date", "count": "Number of Fallouts", "fallout_category": "Kendala"},
+                              line_shape="spline", markers=True)
         st.plotly_chart(fig_fallout, use_container_width=True)
     else:
-        st.info("No fallout data")
+        st.info("No fallout data in selected period")
 
-    # Status donut
-    st.subheader("📊 STATUS ORDER")
-    if not status.empty:
-        fig_donut = px.pie(status, values="count", names="status", hole=0.4,
-                           title="Order Status Distribution")
+    # ----- 4. Subchannel donut chart (Status Order) -----
+    st.subheader("📊 STATUS ORDER (by Subchannel)")
+    if not filtered_sub.empty:
+        sub_agg = filtered_sub.groupby("subchannel")["count"].sum().reset_index()
+        sub_agg["percentage"] = (sub_agg["count"] / sub_agg["count"].sum() * 100).round(1)
+        # Define order of subchannels if needed
+        fig_donut = px.pie(sub_agg, values="count", names="subchannel", hole=0.4,
+                           title=f"Order Distribution by Subchannel (Total: {sub_agg['count'].sum()})",
+                           labels={"subchannel": "Channel", "count": "Orders"})
+        fig_donut.update_traces(textposition='inside', textinfo='percent+label')
         st.plotly_chart(fig_donut, use_container_width=True)
     else:
-        st.info("No status data")
+        st.info("No subchannel data in selected period")
 
-    # Channel breakdown
-    st.subheader("📢 Order Input by Channel")
-    if not channel.empty:
-        fig_channel = px.bar(channel, x="source", y="count", color="source",
-                             title="Orders by Sales Force vs Other Channels")
-        st.plotly_chart(fig_channel, use_container_width=True)
-    else:
-        st.info("No channel data")
+    # ----- 5. Placeholder for interactive map (to be added later) -----
+    st.subheader("🗺️ Interactive Map (Coming Soon)")
+    st.info("Map will be added once data is ready.")
 
-    # Top channels
-    if not top.empty:
-        st.subheader("📢 Top Order Channels")
-        fig_top = px.bar(top, x="channel", y="count", color="channel",
-                         title="Top 5 Order Channels")
-        st.plotly_chart(fig_top, use_container_width=True)
-
-    # Stats
-    st.subheader("📌 STATS & ORDER")
-    avg_completion = 0  # we don't have completion days in summaries now
-    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-    with col_s1:
-        st.metric("Avg Completion (days)", "Coming soon")
-    with col_s2:
-        st.metric("Total Orders", total_orders)
-    with col_s3:
-        st.metric("Active Orders", total_orders - complete_orders)
-    with col_s4:
-        st.metric("Fallout Rate", f"{fallout_pct:.1f}%")
+    # ----- 6. Additional stats (optional, from filtered_metrics) -----
+    st.subheader("📌 Additional Metrics")
+    total_io = filtered_metrics["IO"].sum()
+    total_re = filtered_metrics["RE"].sum()
+    total_ps = filtered_metrics["PS"].sum()
+    total_fallout = filtered_metrics["Fallout"].sum()
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total IO", total_io)
+    with col2:
+        st.metric("Total RE", total_re)
+    with col3:
+        st.metric("Total PS (Complete)", total_ps)
+    with col4:
+        st.metric("Total Fallout", total_fallout)
 
 # ------------------------------
 # OTHER PAGES (placeholders)

@@ -7,13 +7,10 @@ import os
 import traceback
 from github import Auth, Github, GithubException
 
-# ------------------------------
-# PAGE CONFIG
-# ------------------------------
 st.set_page_config(page_title="Sales Dashboard - Manado", layout="wide")
 
 # ------------------------------
-# LOGIN (with query param persistence)
+# LOGIN
 # ------------------------------
 users = {
     "it_admin":    {"password": "itpass",   "role": "IT",                "company": None},
@@ -27,8 +24,6 @@ users = {
 def check_login():
     if "logged_in" in st.session_state and st.session_state.logged_in:
         return True
-
-    # Restore from query param
     if "user" in st.query_params:
         username = st.query_params["user"]
         if username in users:
@@ -37,7 +32,6 @@ def check_login():
             st.session_state.role = users[username]["role"]
             st.session_state.company = users[username]["company"]
             return True
-
     if not st.session_state.get("logged_in", False):
         st.title("🔐 Login to Sales Dashboard")
         username = st.text_input("Username")
@@ -63,24 +57,23 @@ def logout():
     st.rerun()
 
 # ------------------------------------------------------------
-# DATA LOADING FROM GITHUB (Parquet summaries)
+# LOAD PARQUET SUMMARIES FROM GITHUB
 # ------------------------------------------------------------
 @st.cache_data(ttl=60)
 def load_summary_data():
-    """Download the Parquet summary files from GitHub repo."""
     try:
         g = Github(auth=Auth.Token(st.secrets["GITHUB_TOKEN"]))
         repo = g.get_repo(st.secrets["DATA_REPO"])
-        summary_files = ["daily.parquet", "fallout.parquet", "status.parquet", "channel.parquet", "top_channels.parquet"]
+        files = ["daily.parquet", "fallout.parquet", "status.parquet", "channel.parquet", "top_channels.parquet"]
         data = {}
-        for fname in summary_files:
+        for fname in files:
             contents = repo.get_contents(f"summary/{fname}")
             file_content = base64.b64decode(contents.content)
-            temp_file = f"temp_{fname}"
-            with open(temp_file, "wb") as f:
+            temp = f"temp_{fname}"
+            with open(temp, "wb") as f:
                 f.write(file_content)
-            df = pd.read_parquet(temp_file)
-            os.remove(temp_file)
+            df = pd.read_parquet(temp)
+            os.remove(temp)
             data[fname.replace(".parquet", "")] = df
         return data["daily"], data["fallout"], data["status"], data["channel"], data["top_channels"]
     except Exception as e:
@@ -88,21 +81,12 @@ def load_summary_data():
         st.code(traceback.format_exc())
         return None, None, None, None, None
 
-# ------------------------------------------------------------
-# ROLE FILTER (for agency users, but summaries are already aggregated – we may not need)
-# ------------------------------------------------------------
-def apply_role_filters(df):
-    # For summaries, no row-level filtering needed because raw data is not loaded.
-    # Agency users will only see their own data when we build per-agency pages later.
-    return df
-
 # ------------------------------
 # MAIN APP
 # ------------------------------
 if not check_login():
     st.stop()
 
-# Sidebar
 with st.sidebar:
     st.title("📋 MENU")
     if st.button("🚪 Logout", use_container_width=True):
@@ -111,19 +95,15 @@ with st.sidebar:
     if st.session_state.role == "IT":
         st.subheader("📂 Data Management")
         st.info("Data is pre‑aggregated. To update, run aggregation script locally and upload new Parquet files to GitHub.")
-    menu = st.radio(
-        "Go to",
-        ["Home", "Branch Performance", "Agency Performance", "Alpro", "Collection"],
-        index=0
-    )
+    menu = st.radio("Go to", ["Home", "Branch Performance", "Agency Performance", "Alpro", "Collection"], index=0)
 
-# Load summary data
 daily, fallout, status, channel, top = load_summary_data()
 if daily is None:
     st.stop()
 
-# Filter by date range (the dashboard still allows date range selection)
-# The daily table has a 'date' column (datetime)
+# ------------------------------
+# DATE RANGE (using direct date objects)
+# ------------------------------
 min_date = daily["date"].min()
 max_date = daily["date"].max()
 default_start = min_date
@@ -132,18 +112,14 @@ default_end = max_date
 st.markdown("## 🏠 SALES DASHBOARD – BRANCH MANADO")
 col_date, col_user = st.columns([3,1])
 with col_date:
-    date_range = st.date_input(
-        "📅 Select Date Range",
-        value=(default_start, default_end),
-        min_value=min_date,
-        max_value=max_date
-    )
+    date_range = st.date_input("📅 Select Date Range", value=(default_start, default_end),
+                               min_value=min_date, max_value=max_date)
 with col_user:
     st.write(f"👤 **{st.session_state.username}** | Role: {st.session_state.role}")
 
 if len(date_range) == 2:
     start, end = date_range
-    filtered_daily = daily[(daily["date"] >= pd.to_datetime(start)) & (daily["date"] <= pd.to_datetime(end))]
+    filtered_daily = daily[(daily["date"] >= start) & (daily["date"] <= end)]
 else:
     filtered_daily = daily.copy()
     start, end = default_start, default_end
@@ -151,12 +127,11 @@ else:
 st.sidebar.markdown(f"**Data period:** {start} to {end}")
 
 # ------------------------------
-# HOME PAGE (using pre‑aggregated summaries)
+# HOME PAGE
 # ------------------------------
 if menu == "Home":
     st.header("📊 Area of Operations Analysis (AOA)")
 
-    # Totals from filtered daily data
     total_orders = filtered_daily["IO"].sum()
     complete_orders = filtered_daily["Complete"].sum()
     fallout_orders = filtered_daily["Fallout"].sum()
@@ -169,7 +144,7 @@ if menu == "Home":
     with col_b:
         st.metric("✅ COMPLETE", f"{complete_pct:.1f}%", delta=f"{complete_orders} orders")
 
-    # IO/RE/PS trend using filtered_daily
+    # IO/RE/PS trend
     st.subheader("📈 IO / RE / PS TREND")
     trend = filtered_daily[["date", "IO", "RE", "PS"]].copy()
     trend.rename(columns={"date": "Date"}, inplace=True)
@@ -181,9 +156,7 @@ if menu == "Home":
     else:
         st.info("No data in selected date range")
 
-    # Fallout breakdown (uses global fallout summary, not date‑filtered – but you can filter if fallout table has date)
-    # For simplicity, we use the full fallout counts. If you need date filtering, you'd need to store date per fallout.
-    # We'll keep it as whole period for now (since fallout summary doesn't have date).
+    # Fallout breakdown (global, not date‑filtered – you can enhance later)
     st.subheader("⚠️ TREND FALLOUT KENDALA")
     if not fallout.empty:
         fig_fallout = px.bar(fallout, x="category", y="count", color="category",
@@ -192,7 +165,7 @@ if menu == "Home":
     else:
         st.info("No fallout data")
 
-    # Status order donut
+    # Status donut
     st.subheader("📊 STATUS ORDER")
     if not status.empty:
         fig_donut = px.pie(status, values="count", names="status", hole=0.4,
@@ -201,7 +174,7 @@ if menu == "Home":
     else:
         st.info("No status data")
 
-    # Channel breakdown (Sales Force vs Other)
+    # Channel breakdown
     st.subheader("📢 Order Input by Channel")
     if not channel.empty:
         fig_channel = px.bar(channel, x="source", y="count", color="source",
@@ -217,10 +190,9 @@ if menu == "Home":
                          title="Top 5 Order Channels")
         st.plotly_chart(fig_top, use_container_width=True)
 
-    # Stats row
+    # Stats
     st.subheader("📌 STATS & ORDER")
-    avg_completion = 0
-    # We don't have completion time in summary, but you could add it in daily.
+    avg_completion = 0  # we don't have completion days in summaries now
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
     with col_s1:
         st.metric("Avg Completion (days)", "Coming soon")
@@ -244,5 +216,5 @@ elif menu == "Alpro":
     st.header("🔌 Alpro (ODP Production)")
     st.info("Detailed Alpro page – coming soon.")
 elif menu == "Collection":
-    st.header("💰 Collection")
+    st.header("💰 Collection (C3MR, PRANPC and CT0)")
     st.info("Detailed Collection page – coming soon.")
